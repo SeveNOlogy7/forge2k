@@ -339,8 +339,9 @@ impl Forge2kApp {
                         egui::ComboBox::from_id_salt("method")
                             .selected_text(&self.method)
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.method, "spack".into(), "Spack (Ubuntu 24.04, newer)");
-                                ui.selectable_value(&mut self.method, "toolchain".into(), "Toolchain (Ubuntu 22.04, legacy)");
+                                ui.selectable_value(&mut self.method, "spack".into(), "Spack (Docker, Ubuntu 24.04)");
+                                ui.selectable_value(&mut self.method, "toolchain".into(), "Toolchain (Docker, Ubuntu 22.04)");
+                                ui.selectable_value(&mut self.method, "native".into(), "Native (direct on host)");
                             });
                         ui.add_space(6.0);
 
@@ -348,6 +349,7 @@ impl Forge2kApp {
                         ui.label(RichText::new("CP2K Version").size(12.0).color(Color32::from_rgb(150, 150, 170)));
                         let versions = match self.method.as_str() {
                             "toolchain" => vec!["master", "2026.1", "2025.2", "2024.3", "2024.2", "2024.1", "2023.2"],
+                            "native" => vec!["master", "2026.1", "2025.2", "2024.3"],
                             _ => vec!["2026.1", "2025.2", "2024.3", "2024.2"],
                         };
                         egui::ComboBox::from_id_salt("version")

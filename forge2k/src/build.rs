@@ -2,6 +2,15 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use colored::Colorize;
 use std::io::{BufRead, BufReader};
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .map_err(|e| anyhow!("Cannot chmod +x {}: {}", path.display(), e))
+}
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<()> { Ok(()) }
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -388,6 +397,275 @@ pub fn execute_build(
 }
 
 // ============================================================
+// Native Build (direct on host, no Docker)
+// ============================================================
+
+/// Run a command with real-time output streaming
+fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
+    cmd: &str,
+    args: &[S],
+    workdir: Option<&Path>,
+    log_tx: &mpsc::Sender<LogLine>,
+    cancel_flag: &Arc<Mutex<bool>>,
+) -> Result<()> {
+    let log = |text: &str, is_err: bool| {
+        let ts = Local::now().format("%H:%M:%S").to_string();
+        let _ = log_tx.send(LogLine { timestamp: ts, text: text.to_string(), is_error: is_err });
+    };
+
+    let args_str: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
+    log(&format!("$ {} {}", cmd, args_str.join(" ")), false);
+
+    let mut child = {
+        let mut c = Command::new(cmd);
+        c.args(&args_str);
+        if let Some(wd) = workdir {
+            c.current_dir(wd);
+        }
+        c.stdout(Stdio::piped())
+         .stderr(Stdio::piped())
+         .spawn()
+         .map_err(|e| anyhow!("Failed to run '{}': {}", cmd, e))?
+    };
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let tx1 = log_tx.clone();
+    let cancel1 = cancel_flag.clone();
+    let stdout_thread = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if *cancel1.lock().unwrap() { break; }
+            if let Ok(l) = line {
+                let ts = Local::now().format("%H:%M:%S").to_string();
+                let _ = tx1.send(LogLine { timestamp: ts, text: l, is_error: false });
+            }
+        }
+    });
+
+    let tx2 = log_tx.clone();
+    let cancel2 = cancel_flag.clone();
+    let stderr_thread = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            if *cancel2.lock().unwrap() { break; }
+            if let Ok(l) = line {
+                let is_err = l.to_lowercase().contains("error") || l.to_lowercase().contains("failed");
+                let ts = Local::now().format("%H:%M:%S").to_string();
+                let _ = tx2.send(LogLine { timestamp: ts, text: l, is_error: is_err });
+            }
+        }
+    });
+
+    let status = child.wait().map_err(|e| anyhow!("Command '{}' wait error: {}", cmd, e))?;
+    drop(stdout_thread);
+    drop(stderr_thread);
+
+    if !status.success() {
+        return Err(anyhow!("Command '{}' failed with exit code {:?}", cmd, status.code()));
+    }
+    Ok(())
+}
+
+/// Check if a command/tool is available on the host
+fn check_prereq(name: &str) -> bool {
+    Command::new(name).arg("--version").output().is_ok()
+}
+
+/// Execute a native build directly on the host (no Docker)
+pub fn execute_native_build(
+    config: &BuildConfig,
+    log_tx: mpsc::Sender<LogLine>,
+    cancel_flag: Arc<Mutex<bool>>,
+) -> Result<()> {
+    let log = |text: &str, is_err: bool| {
+        let ts = Local::now().format("%H:%M:%S").to_string();
+        let _ = log_tx.send(LogLine { timestamp: ts, text: text.to_string(), is_error: is_err });
+    };
+
+    log(&format!("🔨 Forge2K Native Build v{}", env!("CARGO_PKG_VERSION")), false);
+    log(&format!("   Method:    native"), false);
+    log(&format!("   Version:   {}", config.version), false);
+    log(&format!("   MPI:       {}", config.mpi), false);
+    log(&format!("   CPU:       {}", config.cpu), false);
+    log(&format!("   CUDA:      {}", config.cuda), false);
+    log(&format!("   Variant:   {}", config.variant), false);
+    log(&format!("   Jobs:      {}", config.jobs), false);
+    log("", false);
+
+    // ── Step 1: Check prerequisites ──
+    log("📋 Step 1/6: Checking system prerequisites...", false);
+    let required = ["gcc", "g++", "gfortran", "git", "make", "cmake", "wget", "bunzip2"];
+    let mut missing: Vec<&str> = Vec::new();
+    for tool in &required {
+        if !check_prereq(tool) { missing.push(*tool); }
+    }
+    if !missing.is_empty() {
+        log(&format!("   Missing: {}", missing.join(", ")), true);
+        log("   Attempting to install missing packages...", false);
+        run_cmd_logged("apt-get", &["update", "-qq"], None, &log_tx, &cancel_flag)?;
+        let mut pkgs: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
+        for extra in &["autoconf", "autogen", "automake", "libtool", "libtool-bin", "ninja-build", "pkg-config", "python3-dev", "python3-pip", "xxd", "xz-utils", "zlib1g-dev"] {
+            pkgs.push(extra.to_string());
+        }
+        let mut args: Vec<String> = vec!["install".into(), "-qq".into(), "--no-install-recommends".into(), "-y".into()];
+        args.extend(pkgs.iter().cloned());
+        let result = run_cmd_logged("apt-get", &args, None, &log_tx, &cancel_flag);
+        if result.is_err() {
+            log("   ⚠️  Some packages failed to install. Trying with sudo...", true);
+            let missing_str = missing.join(" ");
+            let sudo_args: Vec<String> = vec!["apt-get".into(), "install".into(), "-qq".into(), "-y".into(), missing_str];
+            let _ = run_cmd_logged("sudo", &sudo_args, None, &log_tx, &cancel_flag);
+        }
+    } else {
+        log("   ✅ All required tools found", false);
+    }
+    log("", false);
+
+    // ── Step 2: Create working directory ──
+    log("📋 Step 2/6: Setting up working directory...", false);
+    let work_dir = PathBuf::from("/opt/cp2k_build");
+    std::fs::create_dir_all(&work_dir).context("Failed to create /opt/cp2k_build")?;
+    log(&format!("   Work dir: {}", work_dir.display()), false);
+    log("", false);
+
+    // ── Step 3: Clone CP2K ──
+    log("📋 Step 3/6: Cloning CP2K source...", false);
+    let cp2k_dir = work_dir.join("cp2k");
+    if cp2k_dir.exists() {
+        log("   CP2K directory already exists, pulling latest...", false);
+        run_cmd_logged("git", &["-C", cp2k_dir.to_str().unwrap(), "pull"], None, &log_tx, &cancel_flag)?;
+    } else {
+        let clone_url = "https://github.com/cp2k/cp2k.git";
+        let mut git_args: Vec<String> = vec!["clone".into(), "--recursive".into()];
+        if config.version != "master" {
+            let branch = format!("support/v{}", config.version);
+            git_args.push("-b".into());
+            git_args.push(branch);
+        }
+        git_args.push(clone_url.to_string());
+        git_args.push(cp2k_dir.to_str().unwrap().to_string());
+        run_cmd_logged("git", &git_args, None, &log_tx, &cancel_flag)?;
+    }
+    log("", false);
+
+    // ── Step 4: Install toolchain dependencies ──
+    log("📋 Step 4/6: Installing CP2K toolchain dependencies...", false);
+    log("   This will download and compile many libraries (30-60 min)...", false);
+    log("", false);
+
+    let toolchain_dir = cp2k_dir.join("tools").join("toolchain");
+    let toolchain_script = toolchain_dir.join("install_cp2k_toolchain.sh");
+    if !toolchain_script.exists() {
+        return Err(anyhow!("Toolchain script not found at {}", toolchain_script.display()));
+    }
+
+    let tc_script = toolchain_dir.join("install_cp2k_toolchain.sh");
+    let tc_args: Vec<String> = vec![
+        tc_script.to_string_lossy().into_owned(),
+        "-j".into(), config.jobs.to_string(),
+        "--install-all".into(),
+        "--enable-cuda=no".into(), "--with-deepmd=no".into(),
+        "--target-cpu=x86_64".into(),
+        "--with-cusolvermp=no".into(),
+        "--with-gcc=system".into(),
+        "--with-mpich=system".into(),
+    ];
+    run_cmd_logged(
+        "bash", &tc_args,
+        Some(toolchain_dir.as_path()),
+        &log_tx, &cancel_flag,
+    ).map_err(|e| anyhow!("Toolchain installation failed: {}", e))?;
+    log("", false);
+
+    // ── Step 5: Build CP2K ──
+    log("📋 Step 5/6: Building CP2K...", false);
+    log("", false);
+
+    let use_cmake = config.version == "master";
+    if use_cmake {
+        // CMake + Ninja (master branch)
+        let setup_script = toolchain_dir.join("install").join("setup");
+        // Create a build script that sources setup then runs cmake+ninja
+        let build_sh = cp2k_dir.join("build_native.sh");
+        let script = format!(
+            r#"#!/bin/bash
+set -e
+source {}
+cmake -GNinja \
+    -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
+    -DCP2K_USE_EVERYTHING=ON \
+    -DCP2K_USE_DLAF=OFF \
+    -DCP2K_USE_PEXSI=OFF \
+    -Werror=dev \
+    -B build -S .
+ninja -C build -j {}
+cmake --install build --prefix /opt/cp2k/install
+echo "BUILD_COMPLETE"
+"#,
+            setup_script.display(),
+            config.jobs
+        );
+        std::fs::write(&build_sh, &script)?;
+
+        set_executable(&build_sh)?;
+        run_cmd_logged("bash", &[build_sh.to_str().unwrap()], Some(cp2k_dir.as_path()), &log_tx, &cancel_flag)?;
+    } else {
+        // Legacy make approach
+        let arch_dir = "local";
+        // Find arch file
+        let arch_file = toolchain_dir.join("install").join("arch").join(format!("{}.psmp", arch_dir));
+        let arch_dest = cp2k_dir.join("arch").join(format!("{}.psmp", arch_dir));
+
+        if arch_file.exists() {
+            std::fs::copy(&arch_file, &arch_dest)?;
+        }
+
+        let setup_script = toolchain_dir.join("install").join("setup");
+        let build_sh = cp2k_dir.join("build_native.sh");
+        let script = format!(
+            r#"#!/bin/bash
+set -e
+source {}
+make -j {} ARCH={} VERSION=psmp
+echo "BUILD_COMPLETE"
+"#,
+            setup_script.display(),
+            config.jobs,
+            arch_dir
+        );
+        std::fs::write(&build_sh, &script)?;
+
+        set_executable(&build_sh)?;
+
+        run_cmd_logged("bash", &[build_sh.to_str().unwrap()], Some(cp2k_dir.as_path()), &log_tx, &cancel_flag)?;
+    }
+    log("", false);
+
+    // ── Step 6: Verify installation ──
+    log("📋 Step 6/6: Verifying installation...", false);
+    let cp2k_binary = if use_cmake {
+        PathBuf::from("/opt/cp2k/install/bin/cp2k.psmp")
+    } else {
+        cp2k_dir.join("exe").join("local").join("cp2k.psmp")
+    };
+
+    if cp2k_binary.exists() {
+        let size = std::fs::metadata(&cp2k_binary).map(|m| m.len()).unwrap_or(0);
+        log(&format!("   ✅ CP2K built successfully: {}", cp2k_binary.display()), false);
+        log(&format!("   Binary size: {} MB", size / 1_048_576), false);
+        log("", false);
+        log("   🎉 To use CP2K, add to your PATH:", false);
+        log(&format!("      export PATH={}:$PATH", cp2k_binary.parent().unwrap().display()), false);
+    } else {
+        log("   ⚠️  CP2K binary not found at expected location. Check build output above.", true);
+    }
+
+    log("", false);
+    log("✅ Native build completed!", false);
+    Ok(())
+}
+
+// ============================================================
 // Network Diagnostics & Registry Mirror
 // ============================================================
 
@@ -752,10 +1030,10 @@ fn generate_spack_dockerfile(config: &BuildConfig) -> Result<String> {
 FROM ubuntu:24.04 AS build_cp2k
 
 RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
-    g++ gcc gfortran python3 automake bzip2 ca-certificates cmake git \
-    libncurses-dev libssh-dev libssl-dev libtool-bin lsb-release make \
+    g++ gcc gfortran python3 autoconf automake bzip2 ca-certificates cmake git \
+    less libncurses-dev libssh-dev libssl-dev libtool-bin lsb-release make \
     ninja-build openssh-client patch pkgconf python3-dev python3-pip \
-    python3-venv unzip wget xxd xz-utils zstd \
+    python3-venv unzip wget xxd xz-utils zlib1g-dev zstd \
     && rm -rf /var/lib/apt/lists/*
 
 {git_clone}
@@ -842,10 +1120,77 @@ fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
     } else {
         String::new()
     };
+    let use_cmake = config.version == "master";
     let git_clone = if config.version == "master" {
         "RUN git clone --recursive https://github.com/cp2k/cp2k.git /opt/cp2k".to_string()
     } else {
         format!("RUN git clone --recursive -b support/v{} https://github.com/cp2k/cp2k.git /opt/cp2k", config.version)
+    };
+
+    let build_step = if use_cmake {
+        // Master branch uses CMake + Ninja (arch file no longer exists)
+        r#"WORKDIR /opt/cp2k
+ENV TOOLCHAIN_DIR=/opt/cp2k/tools/toolchain
+RUN source ${TOOLCHAIN_DIR}/install/setup && \
+    cmake -GNinja \
+    -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
+    -DCP2K_USE_EVERYTHING=ON \
+    -DCP2K_USE_DLAF=OFF \
+    -DCP2K_USE_PEXSI=OFF \
+    -Werror=dev \
+    -B build -S . && \
+    ninja -C build -j ${NUM_PROCS:-8} && \
+    cmake --install build --prefix /opt/cp2k/install
+
+RUN mkdir -p /toolchain/install /toolchain/scripts && \
+    for d in /opt/cp2k/tools/toolchain/install/*/; do \
+        libdir=$(basename "$d"); \
+        cp -a "$d" /toolchain/install/; \
+    done && \
+    cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#.to_string()
+    } else {
+        // Tagged releases use old make approach with arch files
+        format!(r#"WORKDIR /opt/cp2k
+RUN cp ./tools/toolchain/install/arch/{arch}.psmp ./arch/ && \
+    source ./tools/toolchain/install/setup && \
+    make -j ${{NUM_PROCS:-8}} ARCH={arch} VERSION=psmp
+
+RUN mkdir -p /toolchain/install /toolchain/scripts && \
+    for libdir in $(ldd ./exe/{arch}/cp2k.psmp | \
+                     grep /opt/cp2k/tools/toolchain/install | \
+                     awk '{{print $3}}' | cut -d/ -f7 | \
+                     sort | uniq) setup; do \
+       cp -ar /opt/cp2k/tools/toolchain/install/${{libdir}} /toolchain/install; \
+    done && \
+    cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#,
+                arch = arch_dir)
+    };
+
+    let copy_step: String = if use_cmake {
+        "COPY --from=build /opt/cp2k/install/ /opt/cp2k/install/\n\
+         COPY --from=build /opt/cp2k/data/ /opt/cp2k/data/\n\
+         COPY --from=build /toolchain/ /opt/cp2k/tools/toolchain/".into()
+    } else {
+        format!("COPY --from=build /opt/cp2k/exe/{arch}/ /opt/cp2k/exe/{arch}/\n\
+                 COPY --from=build /opt/cp2k/data/ /opt/cp2k/data/\n\
+                 COPY --from=build /toolchain/ /opt/cp2k/tools/toolchain/",
+                arch = arch_dir)
+    };
+
+    let link_step: String = if use_cmake {
+        r#"RUN ln -sf /opt/cp2k/install/bin/cp2k.psmp /usr/local/bin/cp2k && \
+    ln -sf /opt/cp2k/install/bin/cp2k_shell.psmp /usr/local/bin/cp2k_shell && \
+    ln -sf /opt/cp2k/install/bin/cp2k.popt /usr/local/bin/cp2k.popt
+ENV PATH="/opt/cp2k/install/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/cp2k/install/lib:${LD_LIBRARY_PATH}""#.to_string()
+    } else {
+        format!(r#"RUN for binary in cp2k dumpdcd graph xyz2dcd; do \
+        ln -sf /opt/cp2k/exe/{arch}/${{binary}}.psmp /usr/local/bin/${{binary}}; \
+    done && \
+    ln -sf /opt/cp2k/exe/{arch}/cp2k.psmp /usr/local/bin/cp2k_shell
+ENV PATH="/opt/cp2k/exe/{arch}:${{PATH}}"
+ENV LD_LIBRARY_PATH="/opt/cp2k/tools/toolchain/install/lib:${{LD_LIBRARY_PATH}}""#,
+                arch = arch_dir)
     };
 
     Ok(format!(
@@ -859,8 +1204,12 @@ FROM {base_image} AS build
 {cuda_env}
 
 RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
-    g++ gcc gfortran libmpich-dev mpich openssh-client python3 \
-    bzip2 ca-certificates git make patch pkg-config unzip wget zlib1g-dev
+    autoconf autogen automake autotools-dev \
+    bzip2 ca-certificates \
+    g++ gcc gfortran git less libtool libtool-bin \
+    libmpich-dev make mpich ninja-build openssh-client patch \
+    pkg-config python3 python3-dev python3-pip \
+    unzip wget xxd xz-utils zlib1g-dev
 
 {git_clone}
 
@@ -873,33 +1222,16 @@ RUN ./install_cp2k_toolchain.sh -j ${{NUM_PROCS:-8}} \
     --with-gcc=system \
     --with-mpich=system
 
-WORKDIR /opt/cp2k
-RUN cp ./tools/toolchain/install/arch/{arch}.psmp ./arch/ && \
-    source ./tools/toolchain/install/setup && \
-    make -j ${{NUM_PROCS:-8}} ARCH={arch} VERSION=psmp
-
-RUN mkdir -p /toolchain/install /toolchain/scripts && \
-    for libdir in $(ldd ./exe/{arch}/cp2k.psmp | \
-                     grep /opt/cp2k/tools/toolchain/install | \
-                     awk '{{print $3}}' | cut -d/ -f7 | \
-                     sort | uniq) setup; do \
-       cp -ar /opt/cp2k/tools/toolchain/install/${{libdir}} /toolchain/install; \
-    done && \
-    cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts
+{build_step}
 
 FROM {base_image} AS install
 RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
     g++ gcc gfortran libmpich-dev mpich openssh-client python3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=build /opt/cp2k/exe/{arch}/ /opt/cp2k/exe/{arch}/
-COPY --from=build /opt/cp2k/data/ /opt/cp2k/data/
-COPY --from=build /toolchain/ /opt/cp2k/tools/toolchain/
+{copy_step}
 
-RUN for binary in cp2k dumpdcd graph xyz2dcd; do \
-        ln -sf /opt/cp2k/exe/{arch}/${{binary}}.psmp /usr/local/bin/${{binary}}; \
-    done && \
-    ln -sf /opt/cp2k/exe/{arch}/cp2k.psmp /usr/local/bin/cp2k_shell
+{link_step}
 
 WORKDIR /work
 ENTRYPOINT ["cp2k"]
@@ -913,7 +1245,9 @@ ENTRYPOINT ["cp2k"]
         cuda_flag = cuda_flag,
         cuda_extra = cuda_extra,
         cpu = config.cpu,
-        arch = arch_dir,
         git_clone = git_clone,
+        build_step = build_step,
+        copy_step = copy_step,
+        link_step = link_step,
     ))
 }

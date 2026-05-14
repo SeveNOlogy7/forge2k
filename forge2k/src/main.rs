@@ -37,8 +37,8 @@ enum Commands {
     /// Build a CP2K Docker image (CLI mode)
     #[command(visible_alias = "b")]
     Build {
-        /// Build method: spack (new, ubuntu:24.04) or toolchain (legacy, ubuntu:22.04)
-        #[arg(short = 'm', long = "method", default_value = "spack", value_parser = clap::builder::PossibleValuesParser::new(["spack", "toolchain"]))]
+        /// Build method: spack (Docker, ubuntu:24.04), toolchain (Docker, ubuntu:22.04), native (direct on host)
+        #[arg(short = 'm', long = "method", default_value = "spack", value_parser = clap::builder::PossibleValuesParser::new(["spack", "toolchain", "native"]))]
         method: String,
 
         /// CP2K version: 2026.1, 2025.2, 2023.2, or 'master' for latest HEAD
@@ -251,9 +251,14 @@ fn cmd_build(
     let cancel_flag: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
     let cancel_clone = cancel_flag.clone();
 
+    let is_native = config.method == "native";
     let config_clone = config.clone();
     let build_thread = std::thread::spawn(move || {
-        build::execute_build(&config_clone, tx, cancel_clone)
+        if is_native {
+            build::execute_native_build(&config_clone, tx, cancel_clone)
+        } else {
+            build::execute_build(&config_clone, tx, cancel_clone)
+        }
     });
 
     // Print log lines as they arrive

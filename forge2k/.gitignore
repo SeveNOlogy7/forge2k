@@ -14,3 +14,12 @@ Thumbs.db
 # Docker build temp files
 *.tar.gz
 *.tar.xz
+*.tar
+
+# Build logs
+*.log
+build_master_*
+
+# Temp scripts
+run_build.cmd
+run_native.cmd
