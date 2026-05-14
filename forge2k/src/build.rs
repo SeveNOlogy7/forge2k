@@ -121,7 +121,7 @@ impl BuildConfig {
     pub fn build_docker_args(&self, dockerfile: &Path) -> Vec<String> {
         let mut args = vec!["build".to_string()];
 
-        // Shared memory size
+        // Shared memory size (needed for OpenMPI with many ranks)
         args.push("--shm-size".to_string());
         args.push(self.shm_size.clone());
 
@@ -1129,7 +1129,8 @@ fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
 
     let build_step = if use_cmake {
         // Master branch uses CMake + Ninja (arch file no longer exists)
-        r#"WORKDIR /opt/cp2k
+        r#"SHELL ["/bin/bash", "-c"]
+WORKDIR /opt/cp2k
 ENV TOOLCHAIN_DIR=/opt/cp2k/tools/toolchain
 RUN source ${TOOLCHAIN_DIR}/install/setup && \
     cmake -GNinja \
@@ -1137,6 +1138,7 @@ RUN source ${TOOLCHAIN_DIR}/install/setup && \
     -DCP2K_USE_EVERYTHING=ON \
     -DCP2K_USE_DLAF=OFF \
     -DCP2K_USE_PEXSI=OFF \
+    -DCP2K_USE_DEEPMD=OFF \
     -Werror=dev \
     -B build -S . && \
     ninja -C build -j ${NUM_PROCS:-8} && \
