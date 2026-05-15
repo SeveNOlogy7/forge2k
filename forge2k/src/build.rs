@@ -1127,7 +1127,7 @@ COPY --from=build_cp2k /opt/cp2k/tests /opt/cp2k/tests
 
 RUN ln -sf /opt/cp2k/exe/local/cp2k.psmp /usr/local/bin/cp2k
 ENV PATH="/opt/cp2k/exe/local:${{PATH}}"
-ENV LD_LIBRARY_PATH="/opt/cp2k/lib:${{LD_LIBRARY_PATH}}"
+ENV LD_LIBRARY_PATH="/opt/cp2k/lib"
 WORKDIR /work
 ENTRYPOINT ["cp2k"]
 "#,
@@ -1223,14 +1223,14 @@ RUN mkdir -p /toolchain/install /toolchain/scripts && \
     ln -sf /opt/cp2k/install/bin/cp2k_shell.psmp /usr/local/bin/cp2k_shell && \
     ln -sf /opt/cp2k/install/bin/cp2k.popt /usr/local/bin/cp2k.popt
 ENV PATH="/opt/cp2k/install/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/cp2k/install/lib:${LD_LIBRARY_PATH}""#.to_string()
+ENV LD_LIBRARY_PATH="/opt/cp2k/install/lib""#.to_string()
     } else {
         format!(r#"RUN for binary in cp2k dumpdcd graph xyz2dcd; do \
         ln -sf /opt/cp2k/exe/{arch}/${{binary}}.psmp /usr/local/bin/${{binary}}; \
     done && \
     ln -sf /opt/cp2k/exe/{arch}/cp2k.psmp /usr/local/bin/cp2k_shell
 ENV PATH="/opt/cp2k/exe/{arch}:${{PATH}}"
-ENV LD_LIBRARY_PATH="/opt/cp2k/tools/toolchain/install/lib:${{LD_LIBRARY_PATH}}""#,
+ENV LD_LIBRARY_PATH="/opt/cp2k/tools/toolchain/install/lib""#,
                 arch = arch_dir)
     };
 
