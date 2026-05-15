@@ -596,6 +596,12 @@ cmake -GNinja \
     -DCP2K_USE_EVERYTHING=ON \
     -DCP2K_USE_DLAF=OFF \
     -DCP2K_USE_PEXSI=OFF \
+    -DCP2K_USE_DEEPMD=OFF \
+    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+    -DCMAKE_C_FLAGS="-fno-lto" \
+    -DCMAKE_CXX_FLAGS="-fno-lto" \
+    -DCMAKE_Fortran_FLAGS="-fno-lto" \
+    -DCMAKE_EXE_LINKER_FLAGS="-fno-lto" \
     -Werror=dev \
     -B build -S .
 ninja -C build -j {}
@@ -882,7 +888,7 @@ pub fn list_available_configs() -> Vec<ConfigInfo> {
             variant: "psmp".into(),
             _dockerfile: "2026.1_mpich_x86_64_psmp.Dockerfile".into(),
             base_image: "ubuntu:24.04".into(),
-            description: "Latest CP2K v2026.1 with MPICH, optimized for x86_64 (recommended)".into(),
+            description: "CP2K v2026.1 with Spack + MPICH, x86_64 (recommended)".into(),
         },
         ConfigInfo {
             method: "spack".into(),
@@ -1139,6 +1145,11 @@ RUN source ${TOOLCHAIN_DIR}/install/setup && \
     -DCP2K_USE_DLAF=OFF \
     -DCP2K_USE_PEXSI=OFF \
     -DCP2K_USE_DEEPMD=OFF \
+    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+    -DCMAKE_C_FLAGS="-fno-lto" \
+    -DCMAKE_CXX_FLAGS="-fno-lto" \
+    -DCMAKE_Fortran_FLAGS="-fno-lto" \
+    -DCMAKE_EXE_LINKER_FLAGS="-fno-lto" \
     -Werror=dev \
     -B build -S . && \
     ninja -C build -j ${NUM_PROCS:-8} && \
