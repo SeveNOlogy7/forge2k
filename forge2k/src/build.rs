@@ -1010,21 +1010,45 @@ fn generate_spack_dockerfile(config: &BuildConfig) -> Result<String> {
         format!("RUN git clone --recursive -b support/v{version} https://github.com/cp2k/cp2k.git /opt/cp2k")
     };
 
+    // v2026.1+ renamed cp2k_deps_all_psmp.yaml -> cp2k_deps_psmp.yaml
+    // and added require: target="" inside packages:all section
+    let use_new_deps = version == "master" || version.starts_with("2026") || version.starts_with("2027") || version.starts_with("2028");
+    let (deps_yaml, spack_ver, spack_pkgs_ver) = if use_new_deps {
+        ("cp2k_deps_${CP2K_VERSION}.yaml", "1.1.1", "2026.03.0")
+    } else {
+        ("cp2k_deps_all_${CP2K_VERSION}.yaml", "1.0.0", "2025.07.0")
+    };
+
     let mpi_setup = match mpi.as_str() {
-        "openmpi" => format!(
-            r#"RUN sed -e '/^\s*mpi:/i\      require: target="{cpu}"' \
-    -e 's/- mpich/- openmpi/' \
-    -e '/^\s*xpmem:/i\    openmpi:\n      require:\n        - +internal-hwloc' \
-    -e '/^\s*- "mpich@/ s/^ /#/' \
-    -e '/^#\s*- "openmpi@/ s/^#/ /' \
-    -i /opt/cp2k/tools/spack/cp2k_deps_all_${{CP2K_VERSION}}.yaml"#,
-            cpu = cpu
-        ),
-        _ => format!(
-            r#"RUN sed -e '/^\s*mpi:/i\      require: target="{cpu}"' \
-    -i /opt/cp2k/tools/spack/cp2k_deps_all_${{CP2K_VERSION}}.yaml"#,
-            cpu = cpu
-        ),
+        "openmpi" => {
+            if use_new_deps {
+                format!("RUN sed -i 's/target=\"\"/target=\"{cpu}\"/' /opt/cp2k/tools/spack/{deps} && \
+                         sed -e 's/- mpich/- openmpi/' \
+                         -e '/^\\s*xpmem:/i\\    openmpi:\\n      require:\\n        - +internal-hwloc' \
+                         -e '/^\\s*- \"mpich@/ s/^ /#/' \
+                         -e '/^#\\s*- \"openmpi@/ s/^#/ /' \
+                         -i /opt/cp2k/tools/spack/{deps}",
+                        cpu = cpu, deps = deps_yaml)
+            } else {
+                format!("RUN sed -e '/^\\s*mpi:/i\\      require: target=\"{cpu}\"' \
+                         -e 's/- mpich/- openmpi/' \
+                         -e '/^\\s*xpmem:/i\\    openmpi:\\n      require:\\n        - +internal-hwloc' \
+                         -e '/^\\s*- \"mpich@/ s/^ /#/' \
+                         -e '/^#\\s*- \"openmpi@/ s/^#/ /' \
+                         -i /opt/cp2k/tools/spack/{deps}",
+                        cpu = cpu, deps = deps_yaml)
+            }
+        }
+        _ => {
+            if use_new_deps {
+                format!("RUN sed -i 's/target=\"\"/target=\"{cpu}\"/' /opt/cp2k/tools/spack/{deps}",
+                        cpu = cpu, deps = deps_yaml)
+            } else {
+                format!("RUN sed -e '/^\\s*mpi:/i\\      require: target=\"{cpu}\"' \
+                         -i /opt/cp2k/tools/spack/{deps}",
+                        cpu = cpu, deps = deps_yaml)
+            }
+        }
     };
 
     Ok(format!(
@@ -1046,8 +1070,8 @@ RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
 
 ARG NUM_PROCS=16
 ENV NUM_PROCS=${{NUM_PROCS}}
-ARG SPACK_VERSION=1.0.0
-ARG SPACK_PACKAGES_VERSION=2025.07.0
+ARG SPACK_VERSION={spack_ver}
+ARG SPACK_PACKAGES_VERSION={spack_pkgs_ver}
 ENV SPACK_VERSION=${{SPACK_VERSION}}
 ENV SPACK_PACKAGES_VERSION=${{SPACK_PACKAGES_VERSION}}
 
@@ -1073,8 +1097,8 @@ RUN cp -a /opt/cp2k/tools/spack/cp2k_dev_repo /opt/spack-packages-${{SPACK_PACKA
 
 {mpi_setup}
 
-RUN cat /opt/cp2k/tools/spack/cp2k_deps_all_${{CP2K_VERSION}}.yaml && \
-    spack env create myenv /opt/cp2k/tools/spack/cp2k_deps_all_${{CP2K_VERSION}}.yaml
+RUN cat /opt/cp2k/tools/spack/{deps_yaml} && \
+    spack env create myenv /opt/cp2k/tools/spack/{deps_yaml}
 
 RUN spack -e myenv concretize -f
 ENV SPACK_ENV_VIEW="/opt/spack-${{SPACK_VERSION}}/var/spack/environments/myenv/spack-env/view"
@@ -1108,6 +1132,9 @@ ENTRYPOINT ["cp2k"]
 "#,
         mpi_setup = mpi_setup,
         git_clone = git_clone,
+        deps_yaml = deps_yaml,
+        spack_ver = spack_ver,
+        spack_pkgs_ver = spack_pkgs_ver,
     ))
 }
 
