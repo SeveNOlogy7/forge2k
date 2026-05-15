@@ -1100,10 +1100,11 @@ RUN cp -a /opt/cp2k/tools/spack/cp2k_dev_repo /opt/spack-packages-${{SPACK_PACKA
 RUN cat /opt/cp2k/tools/spack/{deps_yaml} && \
     spack env create myenv /opt/cp2k/tools/spack/{deps_yaml}
 
-RUN spack -e myenv concretize -f
+RUN git config --global http.sslVerify false && \
+    spack -e myenv concretize -f --deprecated
 ENV SPACK_ENV_VIEW="/opt/spack-${{SPACK_VERSION}}/var/spack/environments/myenv/spack-env/view"
-RUN spack -e myenv env depfile -o spack_makefile && \
-    make -j${{NUM_PROCS}} -f spack_makefile
+RUN git config --global http.sslVerify false && \
+    spack -e myenv install
 
 WORKDIR /opt/cp2k
 RUN cp /opt/cp2k/tools/spack/spack_env_relocate.sh . && \
