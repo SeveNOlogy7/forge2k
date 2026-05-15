@@ -1,3 +1,7 @@
+// Windows subsystem: no black console window on desktop launch.
+// CLI mode still works via AttachConsole to parent cmd process.
+#![windows_subsystem = "windows"]
+
 mod build;
 mod gui;
 
@@ -130,7 +134,43 @@ enum Commands {
 // Main Entry Point
 // ============================================================
 
+/// On Windows, attach to parent console for CLI output.
+/// When double-clicked in Explorer (no parent console), fails silently → no console window.
+/// When launched from cmd/powershell, attaches to existing console → CLI output works.
+#[cfg(windows)]
+fn attach_parent_console() {
+    extern "system" {
+        fn AttachConsole(dwProcessId: u32) -> i32;
+        fn SetStdHandle(nStdHandle: u32, h: isize) -> i32;
+    }
+    use std::os::windows::io::IntoRawHandle;
+
+    const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
+    const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5;
+    const STD_ERROR_HANDLE: u32 = 0xFFFFFFF4;
+
+    unsafe {
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return; // No parent console → running from Explorer, just return silently
+        }
+    }
+
+    // After AttachConsole, refresh stdout/stderr handles so println! works
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+        let handle = file.into_raw_handle() as isize;
+        unsafe {
+            SetStdHandle(STD_OUTPUT_HANDLE, handle);
+            SetStdHandle(STD_ERROR_HANDLE, handle);
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    // On Windows (release), try to attach parent console so CLI output works.
+    // When double-clicked (Explorer), no parent → no console → GUI mode clean.
+    #[cfg(windows)]
+    attach_parent_console();
+
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Commands::Gui);
     match command {
