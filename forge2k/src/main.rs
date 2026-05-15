@@ -142,17 +142,21 @@ fn attach_parent_console() {
     extern "system" {
         fn AttachConsole(dwProcessId: u32) -> i32;
         fn SetStdHandle(nStdHandle: u32, h: isize) -> i32;
+        fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
     }
     use std::os::windows::io::IntoRawHandle;
 
     const ATTACH_PARENT_PROCESS: u32 = 0xFFFFFFFF;
     const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5;
     const STD_ERROR_HANDLE: u32 = 0xFFFFFFF4;
+    const CP_UTF8: u32 = 65001;
 
     unsafe {
         if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
             return; // No parent console → running from Explorer, just return silently
         }
+        // Set console to UTF-8 so emoji and box-drawing characters display correctly
+        SetConsoleOutputCP(CP_UTF8);
     }
 
     // After AttachConsole, refresh stdout/stderr handles so println! works
