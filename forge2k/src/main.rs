@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -132,7 +132,8 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    let command = cli.command.unwrap_or(Commands::Gui);
+    match command {
         Commands::Build {
             method,
             version,
