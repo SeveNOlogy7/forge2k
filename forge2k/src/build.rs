@@ -1228,6 +1228,7 @@ RUN printf '#!/bin/bash\n\
 ulimit -c 0 -s unlimited\n\
 export OMP_STACKSIZE=16M\n\
 source /opt/cp2k/tools/toolchain/install/setup\n\
+export LD_LIBRARY_PATH="/opt/cp2k/install/lib:${LD_LIBRARY_PATH}"\n\
 exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint.sh"#.to_string()
     } else {
         format!(r#"RUN for binary in cp2k dumpdcd graph xyz2dcd; do \
@@ -1239,6 +1240,7 @@ RUN printf '#!/bin/bash\n\
 ulimit -c 0 -s unlimited\n\
 export OMP_STACKSIZE=16M\n\
 source /opt/cp2k/tools/toolchain/install/setup\n\
+export LD_LIBRARY_PATH="/opt/cp2k/install/lib:${{LD_LIBRARY_PATH}}"\n\
 exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint.sh"#,
                 arch = arch_dir)
     };
