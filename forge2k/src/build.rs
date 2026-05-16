@@ -1188,6 +1188,7 @@ RUN mkdir -p /toolchain/install /toolchain/scripts && \
         libdir=$(basename "$d"); \
         cp -a "$d" /toolchain/install/; \
     done && \
+    cp /opt/cp2k/tools/toolchain/install/setup /toolchain/install/ && \
     cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#.to_string()
     } else {
         // Tagged releases use old make approach with arch files
@@ -1223,14 +1224,22 @@ RUN mkdir -p /toolchain/install /toolchain/scripts && \
     ln -sf /opt/cp2k/install/bin/cp2k_shell.psmp /usr/local/bin/cp2k_shell && \
     ln -sf /opt/cp2k/install/bin/cp2k.popt /usr/local/bin/cp2k.popt
 ENV PATH="/opt/cp2k/install/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/cp2k/install/lib""#.to_string()
+RUN printf '#!/bin/bash\n\
+ulimit -c 0 -s unlimited\n\
+export OMP_STACKSIZE=16M\n\
+source /opt/cp2k/tools/toolchain/install/setup\n\
+exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint.sh"#.to_string()
     } else {
         format!(r#"RUN for binary in cp2k dumpdcd graph xyz2dcd; do \
         ln -sf /opt/cp2k/exe/{arch}/${{binary}}.psmp /usr/local/bin/${{binary}}; \
     done && \
     ln -sf /opt/cp2k/exe/{arch}/cp2k.psmp /usr/local/bin/cp2k_shell
 ENV PATH="/opt/cp2k/exe/{arch}:${{PATH}}"
-ENV LD_LIBRARY_PATH="/opt/cp2k/tools/toolchain/install/lib""#,
+RUN printf '#!/bin/bash\n\
+ulimit -c 0 -s unlimited\n\
+export OMP_STACKSIZE=16M\n\
+source /opt/cp2k/tools/toolchain/install/setup\n\
+exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint.sh"#,
                 arch = arch_dir)
     };
 
@@ -1275,7 +1284,7 @@ RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
 {link_step}
 
 WORKDIR /work
-ENTRYPOINT ["cp2k"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 "#,
         base_image = base_image,
         cuda_env = if cuda_enabled {
