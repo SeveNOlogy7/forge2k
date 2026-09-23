@@ -1,5 +1,5 @@
 #
-# This file was created by generate_docker_files.py
+# This Dockerfile is bundled with forge2k (generate_dockerfile fallback in src/build.rs; templates in src/templates/)
 #
 # Usage: docker build -f ./2023.2_mpich_generic_cuda_V100_psmp.Dockerfile -t cp2k/cp2k:2023.2_mpich_generic_cuda_V100_psmp .
 

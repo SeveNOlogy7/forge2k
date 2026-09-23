@@ -1,5 +1,5 @@
 #
-# This file was created by generate_docker_files.py
+# This Dockerfile is bundled with forge2k (generate_dockerfile fallback in src/build.rs; templates in src/templates/)
 #
 # Usage: docker build --shm-size=1g -f ./2025.2_mpich_x86_64_psmp.Dockerfile -t cp2k/cp2k:2025.2_mpich_x86_64_psmp .
 
@@ -117,8 +117,6 @@ RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
     libmpich-dev \
     libpython3-dev \
     libstdc++-13-dev \
-    openssh-client \
-    python3 \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
