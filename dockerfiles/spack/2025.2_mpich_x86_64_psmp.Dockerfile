@@ -44,7 +44,7 @@ ENV NUM_PROCS=${NUM_PROCS:-16}
 # Install Spack and Spack packages
 WORKDIR /root/spack
 ARG SPACK_VERSION
-ENV SPACK_VERSION=${SPACK_VERSION:-1.0.0}
+ENV SPACK_VERSION=${SPACK_VERSION:-1.2.2}
 ARG SPACK_PACKAGES_VERSION
 ENV SPACK_PACKAGES_VERSION=${SPACK_PACKAGES_VERSION:-2025.07.0}
 ARG SPACK_REPO=https://github.com/spack/spack
@@ -74,7 +74,7 @@ ARG CP2K_VERSION
 ENV CP2K_VERSION=${CP2K_VERSION:-psmp}
 RUN cp -a /opt/cp2k/tools/spack/cp2k_dev_repo ${SPACK_PACKAGES_ROOT}/repos/spack_repo && \
     spack repo add --scope site ${SPACK_PACKAGES_ROOT}/repos/spack_repo/cp2k_dev_repo
-RUN sed -e '/^\s*mpi:/i\      require: target="x86_64"' -i /opt/cp2k/tools/spack/cp2k_deps_all_${CP2K_VERSION}.yaml && \
+RUN test -f /opt/cp2k/tools/spack/cp2k_deps_all_${CP2K_VERSION}.yaml && \
     cat /opt/cp2k/tools/spack/cp2k_deps_all_${CP2K_VERSION}.yaml && \
     spack env create myenv /opt/cp2k/tools/spack/cp2k_deps_all_${CP2K_VERSION}.yaml && \
     spack -e myenv repo list
