@@ -18,6 +18,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // ============================================================
+// Build Outcome
+// ============================================================
+
+/// Terminal result of a build. Cancellation is an explicit outcome,
+/// not an error; `Err` is reserved for infrastructure failures
+/// (spawn errors, wait errors) that abort the build abnormally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildOutcome {
+    Success,
+    Failed,
+    Cancelled,
+}
+
+// ============================================================
 // Build Configuration
 // ============================================================
 
@@ -276,7 +290,7 @@ pub fn execute_build(
     config: &BuildConfig,
     log_tx: mpsc::Sender<LogLine>,
     cancel_flag: Arc<Mutex<bool>>,
-) -> Result<()> {
+) -> Result<BuildOutcome> {
     let dockerfile = config.resolve_dockerfile()?;
 
     let log = |text: &str, is_err: bool| {
@@ -365,7 +379,7 @@ pub fn execute_build(
         if *cancel_flag.lock().unwrap() {
             let _ = child.kill();
             log("⛔ Build cancelled by user.", true);
-            return Ok(());
+            return Ok(BuildOutcome::Cancelled);
         }
 
         match child.try_wait() {
@@ -379,10 +393,11 @@ pub fn execute_build(
                     log("", false);
                     log("💡 Run with:", false);
                     log(&format!("   docker run --rm -v $(pwd):/work {} cp2k --help", config.default_tag()), false);
+                    return Ok(BuildOutcome::Success);
                 } else {
                     log(&format!("❌ Build failed with exit code: {:?}", status.code()), true);
+                    return Ok(BuildOutcome::Failed);
                 }
-                return Ok(());
             }
             Ok(None) => {
                 // Still running, check cancel flag periodically
@@ -401,13 +416,22 @@ pub fn execute_build(
 // ============================================================
 
 /// Run a command with real-time output streaming
+/// Result of a single external command step. `Cancelled` means the
+/// cancel flag was observed while the child was running and the child
+/// was killed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CmdStatus {
+    Completed,
+    Cancelled,
+}
+
 fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
     cmd: &str,
     args: &[S],
     workdir: Option<&Path>,
     log_tx: &mpsc::Sender<LogLine>,
     cancel_flag: &Arc<Mutex<bool>>,
-) -> Result<()> {
+) -> Result<CmdStatus> {
     let log = |text: &str, is_err: bool| {
         let ts = Local::now().format("%H:%M:%S").to_string();
         let _ = log_tx.send(LogLine { timestamp: ts, text: text.to_string(), is_error: is_err });
@@ -456,14 +480,36 @@ fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
         }
     });
 
-    let status = child.wait().map_err(|e| anyhow!("Command '{}' wait error: {}", cmd, e))?;
-    drop(stdout_thread);
-    drop(stderr_thread);
+    // Poll with try_wait so cancellation can kill the child promptly;
+    // log-reader threads keep draining pipes until EOF or cancel.
+    loop {
+        if *cancel_flag.lock().unwrap() {
+            let _ = child.kill();
+            // Detach readers: pipes EOF when the child dies, but a
+            // grandchild could hold them open, so never join here.
+            drop(stdout_thread);
+            drop(stderr_thread);
+            log(&format!("⛔ '{}' cancelled by user.", cmd), true);
+            return Ok(CmdStatus::Cancelled);
+        }
 
-    if !status.success() {
-        return Err(anyhow!("Command '{}' failed with exit code {:?}", cmd, status.code()));
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                drop(stdout_thread);
+                drop(stderr_thread);
+                if !status.success() {
+                    return Err(anyhow!("Command '{}' failed with exit code {:?}", cmd, status.code()));
+                }
+                return Ok(CmdStatus::Completed);
+            }
+            Ok(None) => {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => {
+                return Err(anyhow!("Command '{}' wait error: {}", cmd, e));
+            }
+        }
     }
-    Ok(())
 }
 
 /// Check if a command/tool is available on the host
@@ -476,7 +522,17 @@ pub fn execute_native_build(
     config: &BuildConfig,
     log_tx: mpsc::Sender<LogLine>,
     cancel_flag: Arc<Mutex<bool>>,
-) -> Result<()> {
+) -> Result<BuildOutcome> {
+    // Run one external step; propagate cancellation as an explicit outcome.
+    macro_rules! run_step {
+        ($($arg:tt)*) => {
+            match run_cmd_logged($($arg)*) {
+                Ok(CmdStatus::Completed) => {}
+                Ok(CmdStatus::Cancelled) => return Ok(BuildOutcome::Cancelled),
+                Err(e) => return Err(e),
+            }
+        };
+    }
     let log = |text: &str, is_err: bool| {
         let ts = Local::now().format("%H:%M:%S").to_string();
         let _ = log_tx.send(LogLine { timestamp: ts, text: text.to_string(), is_error: is_err });
@@ -502,7 +558,7 @@ pub fn execute_native_build(
     if !missing.is_empty() {
         log(&format!("   Missing: {}", missing.join(", ")), true);
         log("   Attempting to install missing packages...", false);
-        run_cmd_logged("apt-get", &["update", "-qq"], None, &log_tx, &cancel_flag)?;
+        run_step!("apt-get", &["update", "-qq"], None, &log_tx, &cancel_flag);
         let mut pkgs: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
         for extra in &["autoconf", "autogen", "automake", "libtool", "libtool-bin", "ninja-build", "pkg-config", "python3-dev", "python3-pip", "xxd", "xz-utils", "zlib1g-dev"] {
             pkgs.push(extra.to_string());
@@ -510,11 +566,17 @@ pub fn execute_native_build(
         let mut args: Vec<String> = vec!["install".into(), "-qq".into(), "--no-install-recommends".into(), "-y".into()];
         args.extend(pkgs.iter().cloned());
         let result = run_cmd_logged("apt-get", &args, None, &log_tx, &cancel_flag);
-        if result.is_err() {
-            log("   ⚠️  Some packages failed to install. Trying with sudo...", true);
-            let missing_str = missing.join(" ");
-            let sudo_args: Vec<String> = vec!["apt-get".into(), "install".into(), "-qq".into(), "-y".into(), missing_str];
-            let _ = run_cmd_logged("sudo", &sudo_args, None, &log_tx, &cancel_flag);
+        match result {
+            Ok(CmdStatus::Completed) => {}
+            Ok(CmdStatus::Cancelled) => return Ok(BuildOutcome::Cancelled),
+            Err(_) => {
+                log("   ⚠️  Some packages failed to install. Trying with sudo...", true);
+                let missing_str = missing.join(" ");
+                let sudo_args: Vec<String> = vec!["apt-get".into(), "install".into(), "-qq".into(), "-y".into(), missing_str];
+                if let Ok(CmdStatus::Cancelled) = run_cmd_logged("sudo", &sudo_args, None, &log_tx, &cancel_flag) {
+                    return Ok(BuildOutcome::Cancelled);
+                }
+            }
         }
     } else {
         log("   ✅ All required tools found", false);
@@ -533,7 +595,7 @@ pub fn execute_native_build(
     let cp2k_dir = work_dir.join("cp2k");
     if cp2k_dir.exists() {
         log("   CP2K directory already exists, pulling latest...", false);
-        run_cmd_logged("git", &["-C", cp2k_dir.to_str().unwrap(), "pull"], None, &log_tx, &cancel_flag)?;
+        run_step!("git", &["-C", cp2k_dir.to_str().unwrap(), "pull"], None, &log_tx, &cancel_flag);
     } else {
         let clone_url = "https://github.com/cp2k/cp2k.git";
         let mut git_args: Vec<String> = vec!["clone".into(), "--recursive".into()];
@@ -544,7 +606,7 @@ pub fn execute_native_build(
         }
         git_args.push(clone_url.to_string());
         git_args.push(cp2k_dir.to_str().unwrap().to_string());
-        run_cmd_logged("git", &git_args, None, &log_tx, &cancel_flag)?;
+        run_step!("git", &git_args, None, &log_tx, &cancel_flag);
     }
     log("", false);
 
@@ -570,11 +632,15 @@ pub fn execute_native_build(
         "--with-gcc=system".into(),
         "--with-mpich=system".into(),
     ];
-    run_cmd_logged(
+    match run_cmd_logged(
         "bash", &tc_args,
         Some(toolchain_dir.as_path()),
         &log_tx, &cancel_flag,
-    ).map_err(|e| anyhow!("Toolchain installation failed: {}", e))?;
+    ) {
+        Ok(CmdStatus::Completed) => {}
+        Ok(CmdStatus::Cancelled) => return Ok(BuildOutcome::Cancelled),
+        Err(e) => return Err(anyhow!("Toolchain installation failed: {}", e)),
+    }
     log("", false);
 
     // ── Step 5: Build CP2K ──
@@ -614,7 +680,7 @@ echo "BUILD_COMPLETE"
         std::fs::write(&build_sh, &script)?;
 
         set_executable(&build_sh)?;
-        run_cmd_logged("bash", &[build_sh.to_str().unwrap()], Some(cp2k_dir.as_path()), &log_tx, &cancel_flag)?;
+        run_step!("bash", &[build_sh.to_str().unwrap()], Some(cp2k_dir.as_path()), &log_tx, &cancel_flag);
     } else {
         // Legacy make approach
         let arch_dir = "local";
@@ -643,7 +709,7 @@ echo "BUILD_COMPLETE"
 
         set_executable(&build_sh)?;
 
-        run_cmd_logged("bash", &[build_sh.to_str().unwrap()], Some(cp2k_dir.as_path()), &log_tx, &cancel_flag)?;
+        run_step!("bash", &[build_sh.to_str().unwrap()], Some(cp2k_dir.as_path()), &log_tx, &cancel_flag);
     }
     log("", false);
 
@@ -668,7 +734,7 @@ echo "BUILD_COMPLETE"
 
     log("", false);
     log("✅ Native build completed!", false);
-    Ok(())
+    Ok(BuildOutcome::Success)
 }
 
 // ============================================================

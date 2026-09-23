@@ -1,6 +1,6 @@
 // Windows subsystem: no black console window on desktop launch.
 // CLI mode still works via AttachConsole to parent cmd process.
-#![windows_subsystem = "windows"]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod build;
 mod gui;
@@ -298,6 +298,27 @@ fn cmd_build(
 
     let is_native = config.method == "native";
     let config_clone = config.clone();
+
+    // Cancel trigger (T2): while the build runs, the main thread reads
+    // stdin; pressing Enter or typing q/quit sets the cancel flag.
+    let cancel_stdin = cancel_flag.clone();
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(l) => {
+                    let t = l.trim().to_ascii_lowercase();
+                    if t.is_empty() || t == "q" || t == "quit" {
+                        *cancel_stdin.lock().unwrap() = true;
+                        break;
+                    }
+                }
+                Err(_) => break, // EOF or read error: leave flag untouched
+            }
+        }
+    });
+
     let build_thread = std::thread::spawn(move || {
         if is_native {
             build::execute_native_build(&config_clone, tx, cancel_clone)
@@ -321,9 +342,17 @@ fn cmd_build(
     }
 
     match build_thread.join() {
-        Ok(Ok(())) => {
+        Ok(Ok(build::BuildOutcome::Success)) => {
             println!("\n{} Build process finished.", "✅".bold());
             Ok(())
+        }
+        Ok(Ok(build::BuildOutcome::Failed)) => {
+            println!("\n{} Build failed.", "❌".red().bold());
+            std::process::exit(1);
+        }
+        Ok(Ok(build::BuildOutcome::Cancelled)) => {
+            println!("\n{} Build cancelled.", "⏹".yellow().bold());
+            std::process::exit(130);
         }
         Ok(Err(e)) => {
             println!("\n{} Build failed: {}", "❌".red().bold(), e.to_string().red());

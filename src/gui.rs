@@ -36,6 +36,7 @@ pub struct Forge2kApp {
     is_building: Arc<Mutex<bool>>,
     cancel_flag: Arc<Mutex<bool>>,
     build_error: Arc<Mutex<Option<String>>>,
+    build_status: Arc<Mutex<Option<build::BuildOutcome>>>,
     log_tx: Option<mpsc::Sender<build::LogLine>>,
 
     // System state
@@ -71,6 +72,7 @@ impl Default for Forge2kApp {
             is_building: Arc::new(Mutex::new(false)),
             cancel_flag: Arc::new(Mutex::new(false)),
             build_error: Arc::new(Mutex::new(None)),
+            build_status: Arc::new(Mutex::new(None)),
             log_tx: None,
             docker_status: "Not checked".into(),
             docker_running: false,
@@ -131,8 +133,10 @@ impl Forge2kApp {
         let is_building = self.is_building.clone();
         let cancel = self.cancel_flag.clone();
         let error = self.build_error.clone();
+        let status = self.build_status.clone();
 
         *is_building.lock().unwrap() = true;
+        *status.lock().unwrap() = None;
 
         // Spawn log collector thread
         std::thread::spawn(move || {
@@ -145,8 +149,18 @@ impl Forge2kApp {
         std::thread::spawn(move || {
             let result = build::execute_build(&config, tx, cancel);
             match result {
-                Ok(()) => {}
+                Ok(build::BuildOutcome::Success) => {
+                    *status.lock().unwrap() = Some(build::BuildOutcome::Success);
+                }
+                Ok(build::BuildOutcome::Failed) => {
+                    *status.lock().unwrap() = Some(build::BuildOutcome::Failed);
+                    *error.lock().unwrap() = Some("Build failed. Check the build output for details.".into());
+                }
+                Ok(build::BuildOutcome::Cancelled) => {
+                    *status.lock().unwrap() = Some(build::BuildOutcome::Cancelled);
+                }
                 Err(e) => {
+                    *status.lock().unwrap() = Some(build::BuildOutcome::Failed);
                     *error.lock().unwrap() = Some(e.to_string());
                 }
             }
@@ -467,6 +481,17 @@ impl Forge2kApp {
                                     });
                                 }
                             }
+                        }
+
+                        // Build result status bar (outcome-driven)
+                        if let Some(outcome) = &*self.build_status.lock().unwrap() {
+                            ui.add_space(8.0);
+                            let (icon, text, color) = match outcome {
+                                build::BuildOutcome::Success => ("✅", "Build completed successfully.", Color32::from_rgb(100, 220, 120)),
+                                build::BuildOutcome::Failed => ("❌", "Build failed.", Color32::from_rgb(255, 100, 100)),
+                                build::BuildOutcome::Cancelled => ("⏹", "Build cancelled.", Color32::from_rgb(255, 200, 80)),
+                            };
+                            ui.label(RichText::new(format!("{} {}", icon, text)).color(color).size(12.0));
                         }
 
                         // Build error display
