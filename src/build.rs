@@ -10,7 +10,9 @@ fn set_executable(path: &Path) -> Result<()> {
         .map_err(|e| anyhow!("Cannot chmod +x {}: {}", path.display(), e))
 }
 #[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<()> { Ok(()) }
+fn set_executable(_path: &Path) -> Result<()> {
+    Ok(())
+}
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -37,18 +39,17 @@ pub enum BuildOutcome {
 
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
-    pub method: String,       // "spack" or "toolchain"
-    pub version: String,      // "2025.2", "2023.2"
-    pub mpi: String,          // "mpich", "openmpi"
-    pub cpu: String,          // "x86_64", "generic", "cascadelake"
-    pub cuda: String,         // "none", "P100", "V100"
-    pub variant: String,      // "psmp", "ssmp", "pdbg", "sdbg"
+    pub method: String,  // "spack" or "toolchain"
+    pub version: String, // "2025.2", "2023.2"
+    pub mpi: String,     // "mpich", "openmpi"
+    pub cpu: String,     // "x86_64", "generic", "cascadelake"
+    pub cuda: String,    // "none", "P100", "V100"
+    pub variant: String, // "psmp", "ssmp", "pdbg", "sdbg"
     pub jobs: u32,
     pub tag: String,
     pub no_cache: bool,
     pub shm_size: String,
     pub dockerfile: Option<PathBuf>,
-    pub _output: String,       // "docker" or "image"
 }
 
 impl BuildConfig {
@@ -93,21 +94,8 @@ impl BuildConfig {
 
     /// Find a bundled Dockerfile matching this configuration, if one exists.
     fn find_bundled_dockerfile(&self) -> Option<PathBuf> {
-        // Look for bundled Dockerfiles relative to the executable
-        let exe_dir = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-            .unwrap_or_default();
-
-        // Search paths for Dockerfiles
-        let search_paths = vec![
-            exe_dir.join("dockerfiles"),
-            PathBuf::from("dockerfiles"),
-            PathBuf::from("."),
-        ];
-
         let filename = self.dockerfile_name();
-        for base in &search_paths {
+        for base in dockerfile_search_paths() {
             let path = base.join(&filename);
             if path.exists() {
                 return Some(path);
@@ -166,7 +154,13 @@ impl BuildConfig {
         args.push(format!("NUM_PROCS={}", self.jobs));
 
         // Context (current directory where Dockerfile lives)
-        args.push(dockerfile.parent().unwrap_or(Path::new(".")).to_string_lossy().to_string());
+        args.push(
+            dockerfile
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_string_lossy()
+                .to_string(),
+        );
 
         args
     }
@@ -177,7 +171,7 @@ impl BuildConfig {
         let tmp_dir = std::env::temp_dir().join("forge2k");
         std::fs::create_dir_all(&tmp_dir).context("Failed to create temp dir for Dockerfile")?;
 
-        let filename = format!("{}.Dockerfile", self.default_tag().replace('/', "_").replace(':', "_"));
+        let filename = format!("{}.Dockerfile", self.default_tag().replace(['/', ':'], "_"));
         let path = tmp_dir.join(&filename);
         std::fs::write(&path, &content).context("Failed to write generated Dockerfile")?;
         Ok(path)
@@ -222,9 +216,18 @@ pub fn check_docker() -> DockerStatus {
 }
 
 pub fn print_docker_install_guide() {
-    println!("{}", "╔══════════════════════════════════════════════════════════╗".yellow());
-    println!("{}", "║       Docker Engine Not Found - Installation Guide      ║".yellow());
-    println!("{}", "╚══════════════════════════════════════════════════════════╝".yellow());
+    println!(
+        "{}",
+        "╔══════════════════════════════════════════════════════════╗".yellow()
+    );
+    println!(
+        "{}",
+        "║       Docker Engine Not Found - Installation Guide      ║".yellow()
+    );
+    println!(
+        "{}",
+        "╚══════════════════════════════════════════════════════════╝".yellow()
+    );
     println!();
 
     #[cfg(target_os = "windows")]
@@ -236,7 +239,10 @@ pub fn print_docker_install_guide() {
         println!("  4. Restart your computer after installation");
         println!("  5. Launch Docker Desktop from Start Menu");
         println!();
-        println!("{}", "WSL 2 Ubuntu Installation (alternative):".cyan().bold());
+        println!(
+            "{}",
+            "WSL 2 Ubuntu Installation (alternative):".cyan().bold()
+        );
         println!("  curl -fsSL https://get.docker.com -o get-docker.sh");
         println!("  sudo sh get-docker.sh");
         println!("  sudo usermod -aG docker $USER");
@@ -252,7 +258,12 @@ pub fn print_docker_install_guide() {
             println!("  sudo usermod -aG docker $USER");
             println!("  newgrp docker");
             println!();
-            println!("{}", "Or with Docker Desktop for Windows (WSL 2 backend):".cyan().bold());
+            println!(
+                "{}",
+                "Or with Docker Desktop for Windows (WSL 2 backend):"
+                    .cyan()
+                    .bold()
+            );
             println!("  Install Docker Desktop on Windows, then enable WSL 2 integration");
             println!("  Settings → Resources → WSL Integration → Enable your distro");
         } else {
@@ -311,7 +322,10 @@ pub fn execute_build(
         });
     };
 
-    log(&format!("🔨 Forge2K Build Engine v{}", env!("CARGO_PKG_VERSION")), false);
+    log(
+        &format!("🔨 Forge2K Build Engine v{}", env!("CARGO_PKG_VERSION")),
+        false,
+    );
     log(&format!("   Method:    {}", config.method), false);
     if config.dockerfile.is_none() && config.find_bundled_dockerfile().is_none() {
         log("ℹ️ No bundled Dockerfile matches this configuration; using a SYNTHESIZED Dockerfile generated at runtime.", false);
@@ -404,10 +418,19 @@ pub fn execute_build(
                     log(&format!("   Image: {}", config.default_tag()), false);
                     log("", false);
                     log("💡 Run with:", false);
-                    log(&format!("   docker run --rm -v $(pwd):/work {} cp2k --help", config.default_tag()), false);
+                    log(
+                        &format!(
+                            "   docker run --rm -v $(pwd):/work {} cp2k --help",
+                            config.default_tag()
+                        ),
+                        false,
+                    );
                     return Ok(BuildOutcome::Success);
                 } else {
-                    log(&format!("❌ Build failed with exit code: {:?}", status.code()), true);
+                    log(
+                        &format!("❌ Build failed with exit code: {:?}", status.code()),
+                        true,
+                    );
                     return Ok(BuildOutcome::Failed);
                 }
             }
@@ -446,7 +469,11 @@ fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
 ) -> Result<CmdStatus> {
     let log = |text: &str, is_err: bool| {
         let ts = Local::now().format("%H:%M:%S").to_string();
-        let _ = log_tx.send(LogLine { timestamp: ts, text: text.to_string(), is_error: is_err });
+        let _ = log_tx.send(LogLine {
+            timestamp: ts,
+            text: text.to_string(),
+            is_error: is_err,
+        });
     };
 
     let args_str: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
@@ -459,9 +486,9 @@ fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
             c.current_dir(wd);
         }
         c.stdout(Stdio::piped())
-         .stderr(Stdio::piped())
-         .spawn()
-         .map_err(|e| anyhow!("Failed to run '{}': {}", cmd, e))?
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| anyhow!("Failed to run '{}': {}", cmd, e))?
     };
 
     let stdout = child.stdout.take().unwrap();
@@ -471,10 +498,16 @@ fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
     let cancel1 = cancel_flag.clone();
     let stdout_thread = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            if *cancel1.lock().unwrap() { break; }
+            if *cancel1.lock().unwrap() {
+                break;
+            }
             if let Ok(l) = line {
                 let ts = Local::now().format("%H:%M:%S").to_string();
-                let _ = tx1.send(LogLine { timestamp: ts, text: l, is_error: false });
+                let _ = tx1.send(LogLine {
+                    timestamp: ts,
+                    text: l,
+                    is_error: false,
+                });
             }
         }
     });
@@ -483,11 +516,18 @@ fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
     let cancel2 = cancel_flag.clone();
     let stderr_thread = std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
-            if *cancel2.lock().unwrap() { break; }
+            if *cancel2.lock().unwrap() {
+                break;
+            }
             if let Ok(l) = line {
-                let is_err = l.to_lowercase().contains("error") || l.to_lowercase().contains("failed");
+                let is_err =
+                    l.to_lowercase().contains("error") || l.to_lowercase().contains("failed");
                 let ts = Local::now().format("%H:%M:%S").to_string();
-                let _ = tx2.send(LogLine { timestamp: ts, text: l, is_error: is_err });
+                let _ = tx2.send(LogLine {
+                    timestamp: ts,
+                    text: l,
+                    is_error: is_err,
+                });
             }
         }
     });
@@ -510,7 +550,11 @@ fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
                 drop(stdout_thread);
                 drop(stderr_thread);
                 if !status.success() {
-                    return Err(anyhow!("Command '{}' failed with exit code {:?}", cmd, status.code()));
+                    return Err(anyhow!(
+                        "Command '{}' failed with exit code {:?}",
+                        cmd,
+                        status.code()
+                    ));
                 }
                 return Ok(CmdStatus::Completed);
             }
@@ -547,11 +591,18 @@ pub fn execute_native_build(
     }
     let log = |text: &str, is_err: bool| {
         let ts = Local::now().format("%H:%M:%S").to_string();
-        let _ = log_tx.send(LogLine { timestamp: ts, text: text.to_string(), is_error: is_err });
+        let _ = log_tx.send(LogLine {
+            timestamp: ts,
+            text: text.to_string(),
+            is_error: is_err,
+        });
     };
 
-    log(&format!("🔨 Forge2K Native Build v{}", env!("CARGO_PKG_VERSION")), false);
-    log(&format!("   Method:    native"), false);
+    log(
+        &format!("🔨 Forge2K Native Build v{}", env!("CARGO_PKG_VERSION")),
+        false,
+    );
+    log("   Method:    native", false);
 
     // ── Step 0: Validate the configuration combination ──
     // The native path is hardcoded for exactly one supported combination
@@ -586,30 +637,63 @@ pub fn execute_native_build(
 
     // ── Step 1: Check prerequisites ──
     log("📋 Step 1/6: Checking system prerequisites...", false);
-    let required = ["gcc", "g++", "gfortran", "git", "make", "cmake", "wget", "bunzip2"];
+    let required = [
+        "gcc", "g++", "gfortran", "git", "make", "cmake", "wget", "bunzip2",
+    ];
     let mut missing: Vec<&str> = Vec::new();
     for tool in &required {
-        if !check_prereq(tool) { missing.push(*tool); }
+        if !check_prereq(tool) {
+            missing.push(*tool);
+        }
     }
     if !missing.is_empty() {
         log(&format!("   Missing: {}", missing.join(", ")), true);
         log("   Attempting to install missing packages...", false);
         run_step!("apt-get", &["update", "-qq"], None, &log_tx, &cancel_flag);
         let mut pkgs: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
-        for extra in &["autoconf", "autogen", "automake", "libtool", "libtool-bin", "ninja-build", "pkg-config", "python3-dev", "python3-pip", "xxd", "xz-utils", "zlib1g-dev"] {
+        for extra in &[
+            "autoconf",
+            "autogen",
+            "automake",
+            "libtool",
+            "libtool-bin",
+            "ninja-build",
+            "pkg-config",
+            "python3-dev",
+            "python3-pip",
+            "xxd",
+            "xz-utils",
+            "zlib1g-dev",
+        ] {
             pkgs.push(extra.to_string());
         }
-        let mut args: Vec<String> = vec!["install".into(), "-qq".into(), "--no-install-recommends".into(), "-y".into()];
+        let mut args: Vec<String> = vec![
+            "install".into(),
+            "-qq".into(),
+            "--no-install-recommends".into(),
+            "-y".into(),
+        ];
         args.extend(pkgs.iter().cloned());
         let result = run_cmd_logged("apt-get", &args, None, &log_tx, &cancel_flag);
         match result {
             Ok(CmdStatus::Completed) => {}
             Ok(CmdStatus::Cancelled) => return Ok(BuildOutcome::Cancelled),
             Err(_) => {
-                log("   ⚠️  Some packages failed to install. Trying with sudo...", true);
+                log(
+                    "   ⚠️  Some packages failed to install. Trying with sudo...",
+                    true,
+                );
                 let missing_str = missing.join(" ");
-                let sudo_args: Vec<String> = vec!["apt-get".into(), "install".into(), "-qq".into(), "-y".into(), missing_str];
-                if let Ok(CmdStatus::Cancelled) = run_cmd_logged("sudo", &sudo_args, None, &log_tx, &cancel_flag) {
+                let sudo_args: Vec<String> = vec![
+                    "apt-get".into(),
+                    "install".into(),
+                    "-qq".into(),
+                    "-y".into(),
+                    missing_str,
+                ];
+                if let Ok(CmdStatus::Cancelled) =
+                    run_cmd_logged("sudo", &sudo_args, None, &log_tx, &cancel_flag)
+                {
                     return Ok(BuildOutcome::Cancelled);
                 }
             }
@@ -631,7 +715,13 @@ pub fn execute_native_build(
     let cp2k_dir = work_dir.join("cp2k");
     if cp2k_dir.exists() {
         log("   CP2K directory already exists, pulling latest...", false);
-        run_step!("git", &["-C", cp2k_dir.to_str().unwrap(), "pull"], None, &log_tx, &cancel_flag);
+        run_step!(
+            "git",
+            &["-C", cp2k_dir.to_str().unwrap(), "pull"],
+            None,
+            &log_tx,
+            &cancel_flag
+        );
     } else {
         let clone_url = "https://github.com/cp2k/cp2k.git";
         let mut git_args: Vec<String> = vec!["clone".into(), "--recursive".into()];
@@ -647,31 +737,44 @@ pub fn execute_native_build(
     log("", false);
 
     // ── Step 4: Install toolchain dependencies ──
-    log("📋 Step 4/6: Installing CP2K toolchain dependencies...", false);
-    log("   This will download and compile many libraries (30-60 min)...", false);
+    log(
+        "📋 Step 4/6: Installing CP2K toolchain dependencies...",
+        false,
+    );
+    log(
+        "   This will download and compile many libraries (30-60 min)...",
+        false,
+    );
     log("", false);
 
     let toolchain_dir = cp2k_dir.join("tools").join("toolchain");
     let toolchain_script = toolchain_dir.join("install_cp2k_toolchain.sh");
     if !toolchain_script.exists() {
-        return Err(anyhow!("Toolchain script not found at {}", toolchain_script.display()));
+        return Err(anyhow!(
+            "Toolchain script not found at {}",
+            toolchain_script.display()
+        ));
     }
 
     let tc_script = toolchain_dir.join("install_cp2k_toolchain.sh");
     let tc_args: Vec<String> = vec![
         tc_script.to_string_lossy().into_owned(),
-        "-j".into(), config.jobs.to_string(),
+        "-j".into(),
+        config.jobs.to_string(),
         "--install-all".into(),
-        "--enable-cuda=no".into(), "--with-deepmd=no".into(),
+        "--enable-cuda=no".into(),
+        "--with-deepmd=no".into(),
         "--target-cpu=x86_64".into(),
         "--with-cusolvermp=no".into(),
         "--with-gcc=system".into(),
         "--with-mpich=system".into(),
     ];
     match run_cmd_logged(
-        "bash", &tc_args,
+        "bash",
+        &tc_args,
         Some(toolchain_dir.as_path()),
-        &log_tx, &cancel_flag,
+        &log_tx,
+        &cancel_flag,
     ) {
         Ok(CmdStatus::Completed) => {}
         Ok(CmdStatus::Cancelled) => return Ok(BuildOutcome::Cancelled),
@@ -716,12 +819,21 @@ echo "BUILD_COMPLETE"
         std::fs::write(&build_sh, &script)?;
 
         set_executable(&build_sh)?;
-        run_step!("bash", &[build_sh.to_str().unwrap()], Some(cp2k_dir.as_path()), &log_tx, &cancel_flag);
+        run_step!(
+            "bash",
+            &[build_sh.to_str().unwrap()],
+            Some(cp2k_dir.as_path()),
+            &log_tx,
+            &cancel_flag
+        );
     } else {
         // Legacy make approach
         let arch_dir = "local";
         // Find arch file
-        let arch_file = toolchain_dir.join("install").join("arch").join(format!("{}.psmp", arch_dir));
+        let arch_file = toolchain_dir
+            .join("install")
+            .join("arch")
+            .join(format!("{}.psmp", arch_dir));
         let arch_dest = cp2k_dir.join("arch").join(format!("{}.psmp", arch_dir));
 
         if arch_file.exists() {
@@ -745,7 +857,13 @@ echo "BUILD_COMPLETE"
 
         set_executable(&build_sh)?;
 
-        run_step!("bash", &[build_sh.to_str().unwrap()], Some(cp2k_dir.as_path()), &log_tx, &cancel_flag);
+        run_step!(
+            "bash",
+            &[build_sh.to_str().unwrap()],
+            Some(cp2k_dir.as_path()),
+            &log_tx,
+            &cancel_flag
+        );
     }
     log("", false);
 
@@ -758,14 +876,28 @@ echo "BUILD_COMPLETE"
     };
 
     if cp2k_binary.exists() {
-        let size = std::fs::metadata(&cp2k_binary).map(|m| m.len()).unwrap_or(0);
-        log(&format!("   ✅ CP2K built successfully: {}", cp2k_binary.display()), false);
+        let size = std::fs::metadata(&cp2k_binary)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        log(
+            &format!("   ✅ CP2K built successfully: {}", cp2k_binary.display()),
+            false,
+        );
         log(&format!("   Binary size: {} MB", size / 1_048_576), false);
         log("", false);
         log("   🎉 To use CP2K, add to your PATH:", false);
-        log(&format!("      export PATH={}:$PATH", cp2k_binary.parent().unwrap().display()), false);
+        log(
+            &format!(
+                "      export PATH={}:$PATH",
+                cp2k_binary.parent().unwrap().display()
+            ),
+            false,
+        );
     } else {
-        log("   ⚠️  CP2K binary not found at expected location. Check build output above.", true);
+        log(
+            "   ⚠️  CP2K binary not found at expected location. Check build output above.",
+            true,
+        );
     }
 
     log("", false);
@@ -810,7 +942,10 @@ pub fn check_registry() -> NetworkStatus {
                 }
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                if stderr.contains("timeout") || stderr.contains("refused") || stderr.contains("no route") {
+                if stderr.contains("timeout")
+                    || stderr.contains("refused")
+                    || stderr.contains("no route")
+                {
                     NetworkStatus::Blocked(stderr)
                 } else {
                     NetworkStatus::Unknown(stderr)
@@ -821,18 +956,9 @@ pub fn check_registry() -> NetworkStatus {
     }
 }
 
-/// Common Docker registry mirrors
-const REGISTRY_MIRRORS: &[&str] = &[
-    "https://docker.mirrors.ustc.edu.cn",
-    "https://mirror.ccs.tencentyun.com",
-    "https://2a59f68c.m.daocloud.io",
-    "https://registry.docker-cn.com",
-    "https://dockerhub.timeweb.cloud",
-];
-
 /// Try to find a working registry mirror
 pub fn detect_best_mirror() -> Option<String> {
-    for mirror in REGISTRY_MIRRORS {
+    for mirror in crate::mirrors::registry_mirror_urls() {
         if test_mirror(mirror) {
             return Some(mirror.to_string());
         }
@@ -858,9 +984,9 @@ fn test_mirror(url: &str) -> bool {
         match output {
             Ok(out) => {
                 let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                return s == "True";
+                s == "True"
             }
-            Err(_) => return false,
+            Err(_) => false,
         }
     }
 
@@ -868,7 +994,16 @@ fn test_mirror(url: &str) -> bool {
     {
         let test_url = format!("{}/v2/_catalog", url.trim_end_matches('/'));
         let output = Command::new("curl")
-            .args(["-s", "-o", "/dev/null", "-w", "%{http_code}", "--connect-timeout", "5", &test_url])
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "--connect-timeout",
+                "5",
+                &test_url,
+            ])
             .output();
         match output {
             Ok(out) => {
@@ -899,8 +1034,8 @@ pub fn set_registry_mirror(url: &str) -> Result<()> {
     let config_path = daemon_config_path();
 
     let mut config: serde_json::Value = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)
-            .context("Failed to read Docker daemon config")?;
+        let content =
+            std::fs::read_to_string(&config_path).context("Failed to read Docker daemon config")?;
         serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
     } else {
         serde_json::json!({})
@@ -914,10 +1049,8 @@ pub fn set_registry_mirror(url: &str) -> Result<()> {
         std::fs::create_dir_all(parent).context("Failed to create .docker directory")?;
     }
 
-    let content = serde_json::to_string_pretty(&config)
-        .context("Failed to serialize config")?;
-    std::fs::write(&config_path, &content)
-        .context("Failed to write Docker daemon config")?;
+    let content = serde_json::to_string_pretty(&config).context("Failed to serialize config")?;
+    std::fs::write(&config_path, &content).context("Failed to write Docker daemon config")?;
 
     Ok(())
 }
@@ -930,8 +1063,8 @@ pub fn remove_registry_mirror() -> Result<()> {
         return Ok(());
     }
 
-    let content = std::fs::read_to_string(&config_path)
-        .context("Failed to read Docker daemon config")?;
+    let content =
+        std::fs::read_to_string(&config_path).context("Failed to read Docker daemon config")?;
     let mut config: serde_json::Value = serde_json::from_str(&content)?;
 
     if let Some(obj) = config.as_object_mut() {
@@ -954,7 +1087,8 @@ pub fn get_registry_mirror() -> Option<String> {
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    config.get("registry-mirrors")?
+    config
+        .get("registry-mirrors")?
         .as_array()?
         .first()?
         .as_str()
@@ -965,6 +1099,15 @@ pub fn get_registry_mirror() -> Option<String> {
 // Configuration Listing
 // ============================================================
 
+/// Where a configuration's Dockerfile comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DockerfileSource {
+    /// A Dockerfile bundled in the dockerfiles/ directory.
+    Bundled,
+    /// No bundled Dockerfile matches; one is synthesized at runtime.
+    Synthesized,
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigInfo {
     pub method: String,
@@ -973,125 +1116,186 @@ pub struct ConfigInfo {
     pub cpu: String,
     pub cuda: String,
     pub variant: String,
-    pub _dockerfile: String,
     pub base_image: String,
     pub description: String,
+    /// Whether the Dockerfile is bundled or synthesized at runtime.
+    pub source: DockerfileSource,
 }
 
-/// List all available pre-configured build configurations
-pub fn list_available_configs() -> Vec<ConfigInfo> {
+/// Directories searched for bundled Dockerfiles (relative to the
+/// executable first, then the working directory).
+fn dockerfile_search_paths() -> Vec<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
     vec![
-        ConfigInfo {
-            method: "spack".into(),
-            version: "2026.1".into(),
-            mpi: "mpich".into(),
-            cpu: "x86_64".into(),
-            cuda: "none".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2026.1_mpich_x86_64_psmp.Dockerfile".into(),
-            base_image: "ubuntu:24.04".into(),
-            description: "CP2K v2026.1 with Spack + MPICH, x86_64 (recommended)".into(),
-        },
-        ConfigInfo {
-            method: "spack".into(),
-            version: "2026.1".into(),
-            mpi: "mpich".into(),
-            cpu: "cascadelake".into(),
-            cuda: "none".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2026.1_mpich_cascadelake_psmp.Dockerfile".into(),
-            base_image: "ubuntu:24.04".into(),
-            description: "CP2K v2026.1 with MPICH, optimized for Cascade Lake CPUs".into(),
-        },
-        ConfigInfo {
-            method: "spack".into(),
-            version: "2026.1".into(),
-            mpi: "openmpi".into(),
-            cpu: "cascadelake".into(),
-            cuda: "none".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2026.1_openmpi_cascadelake_psmp.Dockerfile".into(),
-            base_image: "ubuntu:24.04".into(),
-            description: "CP2K v2026.1 with OpenMPI, optimized for Cascade Lake CPUs".into(),
-        },
-        ConfigInfo {
-            method: "toolchain".into(),
-            version: "master".into(),
-            mpi: "mpich".into(),
-            cpu: "generic".into(),
-            cuda: "none".into(),
-            variant: "psmp".into(),
-            _dockerfile: "master_mpich_generic_psmp.Dockerfile".into(),
-            base_image: "ubuntu:24.04".into(),
-            description: "CP2K latest master branch (bleeding edge)".into(),
-        },
-        ConfigInfo {
-            method: "spack".into(),
-            version: "2025.2".into(),
-            mpi: "mpich".into(),
-            cpu: "x86_64".into(),
-            cuda: "none".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2025.2_mpich_x86_64_psmp.Dockerfile".into(),
-            base_image: "ubuntu:24.04".into(),
-            description: "CP2K 2025.2 with MPICH, x86_64 (stable)".into(),
-        },
-        ConfigInfo {
-            method: "spack".into(),
-            version: "2025.2".into(),
-            mpi: "mpich".into(),
-            cpu: "cascadelake".into(),
-            cuda: "none".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2025.2_mpich_cascadelake_psmp.Dockerfile".into(),
-            base_image: "ubuntu:24.04".into(),
-            description: "CP2K 2025.2 with MPICH, optimized for Cascade Lake CPUs".into(),
-        },
-        ConfigInfo {
-            method: "spack".into(),
-            version: "2025.2".into(),
-            mpi: "openmpi".into(),
-            cpu: "cascadelake".into(),
-            cuda: "none".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2025.2_openmpi_cascadelake_psmp.Dockerfile".into(),
-            base_image: "ubuntu:24.04".into(),
-            description: "CP2K 2025.2 with OpenMPI, optimized for Cascade Lake CPUs".into(),
-        },
-        ConfigInfo {
-            method: "toolchain".into(),
-            version: "2023.2".into(),
-            mpi: "mpich".into(),
-            cpu: "generic".into(),
-            cuda: "none".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2023.2_mpich_generic_psmp.Dockerfile".into(),
-            base_image: "ubuntu:22.04".into(),
-            description: "CP2K 2023.2 with MPICH, generic x86_64 (LTS)".into(),
-        },
-        ConfigInfo {
-            method: "toolchain".into(),
-            version: "2023.2".into(),
-            mpi: "mpich".into(),
-            cpu: "generic".into(),
-            cuda: "V100".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2023.2_mpich_generic_cuda_V100_psmp.Dockerfile".into(),
-            base_image: "nvidia/cuda:12.2.0-devel-ubuntu22.04".into(),
-            description: "CP2K 2023.2 with CUDA V100 GPU acceleration".into(),
-        },
-        ConfigInfo {
-            method: "toolchain".into(),
-            version: "2023.2".into(),
-            mpi: "mpich".into(),
-            cpu: "generic".into(),
-            cuda: "P100".into(),
-            variant: "psmp".into(),
-            _dockerfile: "2023.2_mpich_generic_cuda_P100_psmp.Dockerfile".into(),
-            base_image: "nvidia/cuda:12.2.0-devel-ubuntu22.04".into(),
-            description: "CP2K 2023.2 with CUDA P100 GPU acceleration".into(),
-        },
+        exe_dir.join("dockerfiles"),
+        PathBuf::from("dockerfiles"),
+        PathBuf::from("."),
     ]
+}
+
+/// Derive the base image from a config tuple (kept in sync with the
+/// synthesized Dockerfile templates).
+fn base_image_for(method: &str, cuda: &str) -> &'static str {
+    match method {
+        "toolchain" => {
+            if cuda != "none" {
+                "nvidia/cuda:12.2.0-devel-ubuntu22.04"
+            } else {
+                "ubuntu:22.04"
+            }
+        }
+        _ => "ubuntu:24.04",
+    }
+}
+
+/// Human-readable description for a scanned configuration.
+fn describe(method: &str, version: &str, mpi: &str, cpu: &str, cuda: &str) -> String {
+    let mut parts = vec![format!("CP2K v{} with {}", version, mpi)];
+    if method == "toolchain" {
+        parts.push("toolchain build".to_string());
+    } else {
+        parts.push("Spack build".to_string());
+    }
+    if cuda != "none" {
+        parts.push(format!("CUDA {} GPU acceleration", cuda));
+    } else if cpu != "generic" {
+        parts.push(format!("optimized for {} CPUs", cpu));
+    }
+    parts.join(", ")
+}
+
+/// Parse a bundled Dockerfile filename into a ConfigInfo.
+/// Accepted shapes: <version>_<mpi>_<cpu>_<variant>.Dockerfile and
+/// <version>_<mpi>_<cpu>_cuda_<GPU>_<variant>.Dockerfile.
+fn parse_dockerfile_name(method_dir: &str, name: &str) -> Option<ConfigInfo> {
+    let stem = name.strip_suffix(".Dockerfile")?;
+    let f: Vec<&str> = stem.split('_').collect();
+    if f.len() < 4 {
+        return None;
+    }
+    let variant = f[f.len() - 1].to_string();
+    // Shapes: v_mpi_cpu_variant | v_mpi_cpu_cuda_GPU_variant | v_mpi_x86_64_variant
+    let (version, mpi, cuda, cpu) = if f.len() == 6 && f[3] == "cuda" {
+        (
+            f[0].to_string(),
+            f[1].to_string(),
+            f[4].to_string(),
+            f[2].to_string(),
+        )
+    } else if f.len() == 5 {
+        // cpu targets like x86_64 contribute an extra underscore-separated field
+        (
+            f[0].to_string(),
+            f[1].to_string(),
+            "none".to_string(),
+            format!("{}_{}", f[2], f[3]),
+        )
+    } else if f.len() == 4 {
+        (
+            f[0].to_string(),
+            f[1].to_string(),
+            "none".to_string(),
+            f[2].to_string(),
+        )
+    } else {
+        return None;
+    };
+    Some(ConfigInfo {
+        method: method_dir.to_string(),
+        description: describe(method_dir, &version, &mpi, &cpu, &cuda),
+        base_image: base_image_for(method_dir, &cuda).to_string(),
+        version,
+        mpi,
+        cpu,
+        cuda,
+        variant,
+        source: DockerfileSource::Bundled,
+    })
+}
+
+/// List all available build configurations by scanning the bundled
+/// dockerfiles/ directory. Every bundled entry corresponds to an actual
+/// Dockerfile on disk; well-known configurations without a bundled file
+/// (2026.1, master) are included and marked Synthesized so they stay
+/// selectable/buildable (a Dockerfile is generated at runtime and the
+/// build log says so).
+pub fn list_available_configs() -> Vec<ConfigInfo> {
+    let mut configs: Vec<ConfigInfo> = Vec::new();
+
+    for base in dockerfile_search_paths() {
+        for method_dir in ["spack", "toolchain"] {
+            let entries = match std::fs::read_dir(base.join(method_dir)) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let name = match entry.path().file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                if let Some(cfg) = parse_dockerfile_name(method_dir, &name) {
+                    configs.push(cfg);
+                }
+            }
+        }
+        if !configs.is_empty() {
+            break;
+        }
+    }
+
+    // Well-known advertised configurations with no bundled Dockerfile.
+    let synthesized: &[(&str, &str, &str, &str, &str, &str)] = &[
+        ("spack", "2026.1", "mpich", "x86_64", "none", "psmp"),
+        ("spack", "2026.1", "mpich", "cascadelake", "none", "psmp"),
+        ("spack", "2026.1", "openmpi", "cascadelake", "none", "psmp"),
+        ("toolchain", "master", "mpich", "generic", "none", "psmp"),
+    ];
+    for (method, version, mpi, cpu, cuda, variant) in synthesized {
+        let bundled = configs.iter().any(|c| {
+            c.method == *method
+                && c.version == *version
+                && c.mpi == *mpi
+                && c.cpu == *cpu
+                && c.cuda == *cuda
+                && c.variant == *variant
+        });
+        if !bundled {
+            configs.push(ConfigInfo {
+                method: method.to_string(),
+                version: version.to_string(),
+                mpi: mpi.to_string(),
+                cpu: cpu.to_string(),
+                cuda: cuda.to_string(),
+                variant: variant.to_string(),
+                base_image: base_image_for(method, cuda).to_string(),
+                description: describe(method, version, mpi, cpu, cuda),
+                source: DockerfileSource::Synthesized,
+            });
+        }
+    }
+
+    configs.sort_by(|a, b| {
+        a.method
+            .cmp(&b.method)
+            .then(b.version.cmp(&a.version))
+            .then(a.mpi.cmp(&b.mpi))
+            .then(a.cpu.cmp(&b.cpu))
+            .then(a.cuda.cmp(&b.cuda))
+    });
+    configs
+}
+
+/// Substitute `{{TOKEN}}` placeholders in an include_str! Dockerfile
+/// template. Byte-exact replacement; every token must be provided.
+fn render_template(template: &str, params: &[(&str, &str)]) -> String {
+    let mut out = template.to_string();
+    for (key, value) in params {
+        out = out.replace(&format!("{{{{{}}}}}", key), value);
+    }
+    out
 }
 
 /// Generate Dockerfile content from build config
@@ -1114,7 +1318,10 @@ fn generate_spack_dockerfile(config: &BuildConfig) -> Result<String> {
 
     // v2026.1+ renamed cp2k_deps_all_psmp.yaml -> cp2k_deps_psmp.yaml
     // and added require: target="" inside packages:all section
-    let use_new_deps = version == "master" || version.starts_with("2026") || version.starts_with("2027") || version.starts_with("2028");
+    let use_new_deps = version == "master"
+        || version.starts_with("2026")
+        || version.starts_with("2027")
+        || version.starts_with("2028");
     let (deps_yaml, spack_ver, spack_pkgs_ver) = if use_new_deps {
         ("cp2k_deps_${CP2K_VERSION}.yaml", "1.1.1", "2026.03.0")
     } else {
@@ -1143,107 +1350,41 @@ fn generate_spack_dockerfile(config: &BuildConfig) -> Result<String> {
         }
         _ => {
             if use_new_deps {
-                format!("RUN sed -i 's/target=\"\"/target=\"{cpu}\"/' /opt/cp2k/tools/spack/{deps}",
-                        cpu = cpu, deps = deps_yaml)
+                format!(
+                    "RUN sed -i 's/target=\"\"/target=\"{cpu}\"/' /opt/cp2k/tools/spack/{deps}",
+                    cpu = cpu,
+                    deps = deps_yaml
+                )
             } else {
-                format!("RUN sed -e '/^\\s*mpi:/i\\      require: target=\"{cpu}\"' \
+                format!(
+                    "RUN sed -e '/^\\s*mpi:/i\\      require: target=\"{cpu}\"' \
                          -i /opt/cp2k/tools/spack/{deps}",
-                        cpu = cpu, deps = deps_yaml)
+                    cpu = cpu,
+                    deps = deps_yaml
+                )
             }
         }
     };
 
-    Ok(format!(
-        r#"#
-# Dockerfile generated by Forge2K
-# Inspired by github.com/cp2k/cp2k-containers
-#
-
-FROM ubuntu:24.04 AS build_cp2k
-
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
-    g++ gcc gfortran python3 autoconf automake bzip2 ca-certificates cmake git \
-    less libncurses-dev libssh-dev libssl-dev libtool-bin lsb-release make \
-    ninja-build openssh-client patch pkgconf python3-dev python3-pip \
-    python3-venv unzip wget xxd xz-utils zlib1g-dev zstd \
-    && rm -rf /var/lib/apt/lists/*
-
-{git_clone}
-
-ARG NUM_PROCS=16
-ENV NUM_PROCS=${{NUM_PROCS}}
-ARG SPACK_VERSION={spack_ver}
-ARG SPACK_PACKAGES_VERSION={spack_pkgs_ver}
-ENV SPACK_VERSION=${{SPACK_VERSION}}
-ENV SPACK_PACKAGES_VERSION=${{SPACK_PACKAGES_VERSION}}
-
-RUN mkdir -p /opt/spack-${{SPACK_VERSION}} && \
-    wget -q https://github.com/spack/spack/archive/v${{SPACK_VERSION}}.tar.gz && \
-    tar -xzf v${{SPACK_VERSION}}.tar.gz -C /opt && \
-    rm -f v${{SPACK_VERSION}}.tar.gz && \
-    mkdir -p /opt/spack-packages-${{SPACK_PACKAGES_VERSION}} && \
-    wget -q https://github.com/spack/spack-packages/archive/v${{SPACK_PACKAGES_VERSION}}.tar.gz && \
-    tar -xzf v${{SPACK_PACKAGES_VERSION}}.tar.gz -C /opt && \
-    rm -f v${{SPACK_PACKAGES_VERSION}}.tar.gz
-
-ENV PATH="/opt/spack-${{SPACK_VERSION}}/bin:${{PATH}}"
-RUN spack repo add --scope site /opt/spack-packages-${{SPACK_PACKAGES_VERSION}}/repos/spack_repo/builtin
-RUN spack compiler find
-RUN spack external find --all --not-buildable
-
-ARG CP2K_VERSION=psmp
-ENV CP2K_VERSION=${{CP2K_VERSION}}
-
-RUN cp -a /opt/cp2k/tools/spack/cp2k_dev_repo /opt/spack-packages-${{SPACK_PACKAGES_VERSION}}/repos/spack_repo && \
-    spack repo add --scope site /opt/spack-packages-${{SPACK_PACKAGES_VERSION}}/repos/spack_repo/cp2k_dev_repo
-
-{mpi_setup}
-
-RUN cat /opt/cp2k/tools/spack/{deps_yaml} && \
-    spack env create myenv /opt/cp2k/tools/spack/{deps_yaml}
-
-RUN git config --global http.sslVerify false && \
-    spack -e myenv concretize -f --deprecated
-ENV SPACK_ENV_VIEW="/opt/spack-${{SPACK_VERSION}}/var/spack/environments/myenv/spack-env/view"
-RUN git config --global http.sslVerify false && \
-    spack -e myenv install
-
-WORKDIR /opt/cp2k
-RUN cp /opt/cp2k/tools/spack/spack_env_relocate.sh . && \
-    cp /opt/spack-packages-${{SPACK_PACKAGES_VERSION}}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/*.patch . && \
-    cp /opt/spack-packages-${{SPACK_PACKAGES_VERSION}}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/*.sh . && \
-    bash -c "source /opt/spack-${{SPACK_VERSION}}/share/spack/setup-env.sh && \
-             spack env activate myenv && \
-             spack build-env -- spack install --source cp2k@${{CP2K_VERSION}}"
-
-FROM ubuntu:24.04 AS runtime
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
-    g++ gcc gfortran ca-certificates libgomp1 libopenblas-dev \
-    libmpich-dev libpython3-dev libstdc++-13-dev python3 python3-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=build_cp2k /opt/cp2k/install /opt/cp2k
-COPY --from=build_cp2k /opt/cp2k/exe /opt/cp2k/exe
-COPY --from=build_cp2k /opt/cp2k/data /opt/cp2k/data
-COPY --from=build_cp2k /opt/cp2k/tests /opt/cp2k/tests
-
-RUN ln -sf /opt/cp2k/exe/local/cp2k.psmp /usr/local/bin/cp2k
-ENV PATH="/opt/cp2k/exe/local:${{PATH}}"
-ENV LD_LIBRARY_PATH="/opt/cp2k/lib"
-WORKDIR /work
-ENTRYPOINT ["cp2k"]
-"#,
-        mpi_setup = mpi_setup,
-        git_clone = git_clone,
-        deps_yaml = deps_yaml,
-        spack_ver = spack_ver,
-        spack_pkgs_ver = spack_pkgs_ver,
+    Ok(render_template(
+        include_str!("templates/spack.Dockerfile.tmpl"),
+        &[
+            ("GIT_CLONE", &git_clone),
+            ("SPACK_VER", spack_ver),
+            ("SPACK_PKGS_VER", spack_pkgs_ver),
+            ("MPI_SETUP", &mpi_setup),
+            ("DEPS_YAML", deps_yaml),
+        ],
     ))
 }
 
 fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
     let cuda_enabled = config.cuda != "none";
-    let gpu_ver = if config.cuda == "none" { "no" } else { &config.cuda };
+    let gpu_ver = if config.cuda == "none" {
+        "no"
+    } else {
+        &config.cuda
+    };
     let cuda_flag = if cuda_enabled { "yes" } else { "no" };
     let base_image = if cuda_enabled {
         "nvidia/cuda:12.2.0-devel-ubuntu22.04"
@@ -1260,7 +1401,10 @@ fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
     let git_clone = if config.version == "master" {
         "RUN git clone --recursive https://github.com/cp2k/cp2k.git /opt/cp2k".to_string()
     } else {
-        format!("RUN git clone --recursive -b support/v{} https://github.com/cp2k/cp2k.git /opt/cp2k", config.version)
+        format!(
+            "RUN git clone --recursive -b support/v{} https://github.com/cp2k/cp2k.git /opt/cp2k",
+            config.version
+        )
     };
 
     let build_step = if use_cmake {
@@ -1291,10 +1435,12 @@ RUN mkdir -p /toolchain/install /toolchain/scripts && \
         cp -a "$d" /toolchain/install/; \
     done && \
     cp /opt/cp2k/tools/toolchain/install/setup /toolchain/install/ && \
-    cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#.to_string()
+    cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#
+            .to_string()
     } else {
         // Tagged releases use old make approach with arch files
-        format!(r#"WORKDIR /opt/cp2k
+        format!(
+            r#"WORKDIR /opt/cp2k
 RUN cp ./tools/toolchain/install/arch/{arch}.psmp ./arch/ && \
     source ./tools/toolchain/install/setup && \
     make -j ${{NUM_PROCS:-8}} ARCH={arch} VERSION=psmp
@@ -1307,18 +1453,22 @@ RUN mkdir -p /toolchain/install /toolchain/scripts && \
        cp -ar /opt/cp2k/tools/toolchain/install/${{libdir}} /toolchain/install; \
     done && \
     cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#,
-                arch = arch_dir)
+            arch = arch_dir
+        )
     };
 
     let copy_step: String = if use_cmake {
         "COPY --from=build /opt/cp2k/install/ /opt/cp2k/install/\n\
          COPY --from=build /opt/cp2k/data/ /opt/cp2k/data/\n\
-         COPY --from=build /toolchain/ /opt/cp2k/tools/toolchain/".into()
+         COPY --from=build /toolchain/ /opt/cp2k/tools/toolchain/"
+            .into()
     } else {
-        format!("COPY --from=build /opt/cp2k/exe/{arch}/ /opt/cp2k/exe/{arch}/\n\
+        format!(
+            "COPY --from=build /opt/cp2k/exe/{arch}/ /opt/cp2k/exe/{arch}/\n\
                  COPY --from=build /opt/cp2k/data/ /opt/cp2k/data/\n\
                  COPY --from=build /toolchain/ /opt/cp2k/tools/toolchain/",
-                arch = arch_dir)
+            arch = arch_dir
+        )
     };
 
     let link_step: String = if use_cmake {
@@ -1331,9 +1481,11 @@ ulimit -c 0 -s unlimited\n\
 export OMP_STACKSIZE=16M\n\
 source /opt/cp2k/tools/toolchain/install/setup\n\
 export LD_LIBRARY_PATH="/opt/cp2k/install/lib:${LD_LIBRARY_PATH}"\n\
-exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint.sh"#.to_string()
+exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint.sh"#
+            .to_string()
     } else {
-        format!(r#"RUN for binary in cp2k dumpdcd graph xyz2dcd; do \
+        format!(
+            r#"RUN for binary in cp2k dumpdcd graph xyz2dcd; do \
         ln -sf /opt/cp2k/exe/{arch}/${{binary}}.psmp /usr/local/bin/${{binary}}; \
     done && \
     ln -sf /opt/cp2k/exe/{arch}/cp2k.psmp /usr/local/bin/cp2k_shell
@@ -1344,64 +1496,29 @@ export OMP_STACKSIZE=16M\n\
 source /opt/cp2k/tools/toolchain/install/setup\n\
 export LD_LIBRARY_PATH="/opt/cp2k/install/lib:${{LD_LIBRARY_PATH}}"\n\
 exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint.sh"#,
-                arch = arch_dir)
+            arch = arch_dir
+        )
     };
 
-    Ok(format!(
-        r#"#
-# Dockerfile generated by Forge2K
-# Inspired by github.com/cp2k/cp2k-containers
-#
-
-FROM {base_image} AS build
-
-{cuda_env}
-
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
-    autoconf autogen automake autotools-dev \
-    bzip2 ca-certificates \
-    g++ gcc gfortran git less libtool libtool-bin \
-    libmpich-dev make mpich ninja-build openssh-client patch \
-    pkg-config python3 python3-dev python3-pip \
-    unzip wget xxd xz-utils zlib1g-dev
-
-{git_clone}
-
-WORKDIR /opt/cp2k/tools/toolchain
-RUN ./install_cp2k_toolchain.sh -j ${{NUM_PROCS:-8}} \
-    --install-all \
-    --enable-cuda={cuda_flag} {cuda_extra} --with-deepmd=no \
-    --target-cpu={cpu} \
-    --with-cusolvermp=no \
-    --with-gcc=system \
-    --with-mpich=system
-
-{build_step}
-
-FROM {base_image} AS install
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
-    g++ gcc gfortran libmpich-dev mpich openssh-client python3 \
-    && rm -rf /var/lib/apt/lists/*
-
-{copy_step}
-
-{link_step}
-
-WORKDIR /work
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-"#,
-        base_image = base_image,
-        cuda_env = if cuda_enabled {
-            "ENV CUDA_PATH /usr/local/cuda\nENV LD_LIBRARY_PATH /usr/local/cuda/lib64\nENV CUDA_CACHE_DISABLE 1"
-        } else {
-            ""
-        },
-        cuda_flag = cuda_flag,
-        cuda_extra = cuda_extra,
-        cpu = config.cpu,
-        git_clone = git_clone,
-        build_step = build_step,
-        copy_step = copy_step,
-        link_step = link_step,
+    Ok(render_template(
+        include_str!("templates/toolchain.Dockerfile.tmpl"),
+        &[
+            ("BASE_IMAGE", base_image),
+            (
+                "CUDA_ENV",
+                if cuda_enabled {
+                    "ENV CUDA_PATH /usr/local/cuda\nENV LD_LIBRARY_PATH /usr/local/cuda/lib64\nENV CUDA_CACHE_DISABLE 1"
+                } else {
+                    ""
+                },
+            ),
+            ("CUDA_FLAG", cuda_flag),
+            ("CUDA_EXTRA", &cuda_extra),
+            ("CPU", &config.cpu),
+            ("GIT_CLONE", &git_clone),
+            ("BUILD_STEP", &build_step),
+            ("COPY_STEP", &copy_step),
+            ("LINK_STEP", &link_step),
+        ],
     ))
 }

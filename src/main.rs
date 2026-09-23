@@ -4,6 +4,7 @@
 
 mod build;
 mod gui;
+mod mirrors;
 
 use anyhow::Result;
 use build::{check_docker, print_docker_install_guide, DockerStatus};
@@ -193,13 +194,17 @@ fn main() -> Result<()> {
             output,
             force,
         } => cmd_build(
-            method, version, mpi, cpu, cuda, variant,
-            jobs, tag, no_cache, dockerfile, shm_size, output, force,
+            method, version, mpi, cpu, cuda, variant, jobs, tag, no_cache, dockerfile, shm_size,
+            output, force,
         ),
         Commands::List { method, version } => cmd_list(method, version),
         Commands::Gui => cmd_gui(),
         Commands::Check => cmd_check(),
-        Commands::Mirror { url, remove, restart } => cmd_mirror(url, remove, restart),
+        Commands::Mirror {
+            url,
+            remove,
+            restart,
+        } => cmd_mirror(url, remove, restart),
     }
 }
 
@@ -207,6 +212,7 @@ fn main() -> Result<()> {
 // Command Handlers
 // ============================================================
 
+#[allow(clippy::too_many_arguments)] // CLI surface: each flag maps to one BuildConfig field
 fn cmd_build(
     method: String,
     version: String,
@@ -219,7 +225,9 @@ fn cmd_build(
     no_cache: bool,
     dockerfile: Option<String>,
     shm_size: String,
-    output: String,
+    // Accepted for CLI compatibility; the output format is not consumed
+    // anywhere yet (dead field `_output` was removed).
+    _output: String,
     force: bool,
 ) -> Result<()> {
     print_banner();
@@ -227,7 +235,10 @@ fn cmd_build(
     // Check Docker
     if !force {
         match check_docker() {
-            DockerStatus::Installed { version: ver, running: true } => {
+            DockerStatus::Installed {
+                version: ver,
+                running: true,
+            } => {
                 println!("{} Docker Engine: {} (running)", "✓".green(), ver.cyan());
             }
             DockerStatus::Installed { running: false, .. } => {
@@ -253,11 +264,7 @@ fn cmd_build(
         }
     }
 
-    let num_jobs = if jobs == 0 {
-        num_cpus() as u32
-    } else {
-        jobs
-    };
+    let num_jobs = if jobs == 0 { num_cpus() as u32 } else { jobs };
 
     let config = build::BuildConfig {
         method,
@@ -271,7 +278,6 @@ fn cmd_build(
         no_cache,
         dockerfile: dockerfile.map(std::path::PathBuf::from),
         shm_size,
-        _output: output,
     };
 
     println!("\n{}", "Build Configuration:".yellow().bold());
@@ -355,7 +361,11 @@ fn cmd_build(
             std::process::exit(130);
         }
         Ok(Err(e)) => {
-            println!("\n{} Build failed: {}", "❌".red().bold(), e.to_string().red());
+            println!(
+                "\n{} Build failed: {}",
+                "❌".red().bold(),
+                e.to_string().red()
+            );
             std::process::exit(1);
         }
         Err(e) => {
@@ -370,40 +380,74 @@ fn cmd_list(method_filter: Option<String>, version_filter: Option<String>) -> Re
 
     let filtered: Vec<_> = configs
         .into_iter()
-                .filter(|c| {
-            method_filter.as_ref().map_or(true, |m| c.method.as_str() == m.as_str())
-                && version_filter.as_ref().map_or(true, |v| c.version.as_str() == v.as_str())
+        .filter(|c| {
+            method_filter
+                .as_ref()
+                .is_none_or(|m| c.method.as_str() == m.as_str())
+                && version_filter
+                    .as_ref()
+                    .is_none_or(|v| c.version.as_str() == v.as_str())
         })
         .collect();
 
     if filtered.is_empty() {
-        println!("{} No configurations match the given filters.", "ℹ".yellow());
+        println!(
+            "{} No configurations match the given filters.",
+            "ℹ".yellow()
+        );
         return Ok(());
     }
 
     println!();
-    println!("{}", "╔══════════════════════════════════════════════════════════════════════════════════╗".bright_black());
-    println!("{}", "║                           Available Build Configurations                        ║".yellow().bold());
-    println!("{}", "╚══════════════════════════════════════════════════════════════════════════════════╝".bright_black());
+    println!(
+        "{}",
+        "╔══════════════════════════════════════════════════════════════════════════════════╗"
+            .bright_black()
+    );
+    println!(
+        "{}",
+        "║                           Available Build Configurations                        ║"
+            .yellow()
+            .bold()
+    );
+    println!(
+        "{}",
+        "╚══════════════════════════════════════════════════════════════════════════════════╝"
+            .bright_black()
+    );
     println!();
 
     for (i, config) in filtered.iter().enumerate() {
         let num = format!("#{}", i + 1);
-        println!("  {}  {}", num.yellow().bold(), config.description.cyan());
-        println!("      {} {}/{} ({})",
+        let marker = match config.source {
+            build::DockerfileSource::Bundled => String::new(),
+            build::DockerfileSource::Synthesized => {
+                "  [synthesized: no bundled Dockerfile, generated at build time]".to_string()
+            }
+        };
+        println!(
+            "  {}  {}{}",
+            num.yellow().bold(),
+            config.description.cyan(),
+            marker.yellow()
+        );
+        println!(
+            "      {} {}/{} ({})",
             "Method:".dimmed(),
             config.method,
             config.version,
             config.base_image,
         );
-        println!("      {} {} / {} / {} / {}",
+        println!(
+            "      {} {} / {} / {} / {}",
             "Specs:".dimmed(),
             format!("MPI={}", config.mpi).bright_blue(),
             format!("CPU={}", config.cpu).bright_blue(),
             format!("CUDA={}", config.cuda).bright_blue(),
             format!("Variant={}", config.variant).bright_blue(),
         );
-        println!("      {} forge2k build -m {} -v {} --mpi {} --cpu {} --cuda {} --variant {}",
+        println!(
+            "      {} forge2k build -m {} -v {} --mpi {} --cpu {} --cuda {} --variant {}",
             "Build:".dimmed(),
             config.method,
             config.version,
@@ -415,7 +459,10 @@ fn cmd_list(method_filter: Option<String>, version_filter: Option<String>) -> Re
         println!();
     }
 
-    println!("  {} Run 'forge2k gui' for the interactive builder!", "💡".yellow());
+    println!(
+        "  {} Run 'forge2k gui' for the interactive builder!",
+        "💡".yellow()
+    );
     println!();
     Ok(())
 }
@@ -426,15 +473,29 @@ fn cmd_gui() -> Result<()> {
 
 fn cmd_check() -> Result<()> {
     println!();
-    println!("{}", "╔══════════════════════════════════════════════════════════╗".bright_black());
-    println!("{}", "║              Forge2K System Diagnostics                  ║".yellow().bold());
-    println!("{}", "╚══════════════════════════════════════════════════════════╝".bright_black());
+    println!(
+        "{}",
+        "╔══════════════════════════════════════════════════════════╗".bright_black()
+    );
+    println!(
+        "{}",
+        "║              Forge2K System Diagnostics                  ║"
+            .yellow()
+            .bold()
+    );
+    println!(
+        "{}",
+        "╚══════════════════════════════════════════════════════════╝".bright_black()
+    );
     println!();
 
     // Check Docker
     println!("{}", "── Docker Engine ──".cyan().bold());
     match check_docker() {
-        DockerStatus::Installed { version, running: true } => {
+        DockerStatus::Installed {
+            version,
+            running: true,
+        } => {
             println!("  {} Docker is installed and running", "✓".green());
             println!("    Version: {}", version.cyan());
         }
@@ -464,7 +525,10 @@ fn cmd_check() -> Result<()> {
             println!("  {} BuildKit available: {}", "✓".green(), ver.cyan());
         }
         _ => {
-            println!("  {} BuildKit not detected (using legacy builder)", "ℹ".yellow());
+            println!(
+                "  {} BuildKit not detected (using legacy builder)",
+                "ℹ".yellow()
+            );
         }
     }
     println!();
@@ -476,7 +540,11 @@ fn cmd_check() -> Result<()> {
             println!("  {} Registry access is good (fast)", "✓".green());
         }
         build::NetworkStatus::Slow(t) => {
-            println!("  {} Registry access is slow ({})", "⚠".yellow(), t.yellow());
+            println!(
+                "  {} Registry access is slow ({})",
+                "⚠".yellow(),
+                t.yellow()
+            );
         }
         build::NetworkStatus::Blocked(reason) => {
             println!("  {} Registry access appears blocked", "✗".red());
@@ -484,7 +552,11 @@ fn cmd_check() -> Result<()> {
             println!("    Suggested action: forge2k mirror --detect");
         }
         build::NetworkStatus::Unknown(reason) => {
-            println!("  {} Registry status unknown: {}", "?".yellow(), reason.dimmed());
+            println!(
+                "  {} Registry status unknown: {}",
+                "?".yellow(),
+                reason.dimmed()
+            );
         }
     }
 
@@ -508,7 +580,13 @@ fn cmd_check() -> Result<()> {
             #[cfg(target_os = "windows")]
             {
                 let df = std::process::Command::new("wmic")
-                    .args(["logicaldisk", "where", "drivetype=3", "get", "deviceid,freespace"])
+                    .args([
+                        "logicaldisk",
+                        "where",
+                        "drivetype=3",
+                        "get",
+                        "deviceid,freespace",
+                    ])
                     .output();
                 if let Ok(df) = df {
                     println!("  {}", String::from_utf8_lossy(&df.stdout).trim());
@@ -524,8 +602,12 @@ fn cmd_check() -> Result<()> {
                     for line in out.lines().skip(1) {
                         let parts: Vec<&str> = line.split_whitespace().collect();
                         if parts.len() >= 4 {
-                            println!("  Available: {} (used: {} of {})",
-                                parts[3].cyan(), parts[2], parts[1]);
+                            println!(
+                                "  Available: {} (used: {} of {})",
+                                parts[3].cyan(),
+                                parts[2],
+                                parts[1]
+                            );
                         }
                     }
                 }
@@ -542,7 +624,10 @@ fn cmd_check() -> Result<()> {
             println!("  Run 'forge2k build' or 'forge2k gui' to get started.");
         }
         _ => {
-            println!("  {} Please resolve the issues above before building.", "ℹ".yellow());
+            println!(
+                "  {} Please resolve the issues above before building.",
+                "ℹ".yellow()
+            );
         }
     }
     println!();
@@ -588,13 +673,24 @@ fn cmd_mirror(url: Option<String>, remove: bool, restart: bool) -> Result<()> {
 
     // Validate URL format
     if !mirror_url.starts_with("http://") && !mirror_url.starts_with("https://") {
-        println!("{} Invalid mirror URL. Must start with http:// or https://", "✗".red());
+        println!(
+            "{} Invalid mirror URL. Must start with http:// or https://",
+            "✗".red()
+        );
         return Ok(());
     }
 
-    println!("{} Configuring registry mirror: {}", "📝".bold(), mirror_url.cyan());
+    println!(
+        "{} Configuring registry mirror: {}",
+        "📝".bold(),
+        mirror_url.cyan()
+    );
     build::set_registry_mirror(&mirror_url)?;
-    println!("{} Configuration saved to: {}", "✓".green(), build::daemon_config_path().to_string_lossy().cyan());
+    println!(
+        "{} Configuration saved to: {}",
+        "✓".green(),
+        build::daemon_config_path().to_string_lossy().cyan()
+    );
 
     if restart {
         println!("{} Restarting Docker...", "🔄".bold());
@@ -619,7 +715,10 @@ fn cmd_mirror(url: Option<String>, remove: bool, restart: bool) -> Result<()> {
 fn print_banner() {
     println!();
     println!("{}", "╔══════════════════════════════════════╗".yellow());
-    println!("{}", "║          Forge2K  v1.0.0            ║".yellow().bold());
+    println!(
+        "{}",
+        "║          Forge2K  v1.0.0            ║".yellow().bold()
+    );
     println!("{}", "║   CP2K Docker Image Builder         ║".yellow());
     println!("{}", "╚══════════════════════════════════════╝".yellow());
     println!();

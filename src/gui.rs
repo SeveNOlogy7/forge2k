@@ -37,7 +37,6 @@ pub struct Forge2kApp {
     cancel_flag: Arc<Mutex<bool>>,
     build_error: Arc<Mutex<Option<String>>>,
     build_status: Arc<Mutex<Option<build::BuildOutcome>>>,
-    log_tx: Option<mpsc::Sender<build::LogLine>>,
 
     // System state
     docker_status: String,
@@ -73,7 +72,6 @@ impl Default for Forge2kApp {
             cancel_flag: Arc::new(Mutex::new(false)),
             build_error: Arc::new(Mutex::new(None)),
             build_status: Arc::new(Mutex::new(None)),
-            log_tx: None,
             docker_status: "Not checked".into(),
             docker_running: false,
             docker_checked: false,
@@ -123,11 +121,9 @@ impl Forge2kApp {
             no_cache: false,
             dockerfile: None,
             shm_size: self.shm_size.clone(),
-            _output: "docker".into(),
         };
 
         let (tx, rx) = mpsc::channel::<build::LogLine>();
-        self.log_tx = Some(tx.clone());
 
         let logs = self.build_logs.clone();
         let is_building = self.is_building.clone();
@@ -160,7 +156,8 @@ impl Forge2kApp {
                 }
                 Ok(build::BuildOutcome::Failed) => {
                     *status.lock().unwrap() = Some(build::BuildOutcome::Failed);
-                    *error.lock().unwrap() = Some("Build failed. Check the build output for details.".into());
+                    *error.lock().unwrap() =
+                        Some("Build failed. Check the build output for details.".into());
                 }
                 Ok(build::BuildOutcome::Cancelled) => {
                     *status.lock().unwrap() = Some(build::BuildOutcome::Cancelled);
@@ -207,26 +204,14 @@ impl Forge2kApp {
             build::NetworkStatus::Blocked(reason) => {
                 self.registry_status = format!("❌ Blocked - {}", reason);
                 if self.current_mirror.is_empty() {
-                    self.registry_status.push_str("\n   Try: Settings → Auto-detect Mirror");
+                    self.registry_status
+                        .push_str("\n   Try: Settings → Auto-detect Mirror");
                 }
             }
             build::NetworkStatus::Unknown(reason) => {
                 self.registry_status = format!("❓ {}", reason);
             }
         }
-    }
-
-    #[allow(dead_code)]
-    fn config_summary(&self) -> Vec<(String, String)> {
-        vec![
-            ("Method".into(), format!("{} / CP2K {}", self.method, self.version)),
-            ("MPI".into(), self.mpi.clone()),
-            ("CPU Target".into(), self.cpu.clone()),
-            ("CUDA".into(), self.cuda.clone()),
-            ("Variant".into(), self.variant.clone()),
-            ("Jobs".into(), if self.jobs == "0" { "Auto".into() } else { self.jobs.clone() }),
-            ("SHM Size".into(), self.shm_size.clone()),
-        ]
     }
 }
 
@@ -283,9 +268,13 @@ impl eframe::App for Forge2kApp {
                         Color32::from_rgb(200, 80, 80)
                     };
                     ui.label(
-                        RichText::new(if self.docker_running { "● Docker OK" } else { "○ Docker" })
-                            .size(11.0)
-                            .color(status_color),
+                        RichText::new(if self.docker_running {
+                            "● Docker OK"
+                        } else {
+                            "○ Docker"
+                        })
+                        .size(11.0)
+                        .color(status_color),
                     );
                 });
             });
@@ -296,24 +285,26 @@ impl eframe::App for Forge2kApp {
             // Tab bar
             ui.horizontal(|ui| {
                 ui.add_space(8.0);
-                let tabs = [("🛠 Build", Tab::Build), ("📊 System", Tab::System), ("⚙ Settings", Tab::Settings), ("ℹ About", Tab::About)];
+                let tabs = [
+                    ("🛠 Build", Tab::Build),
+                    ("📊 System", Tab::System),
+                    ("⚙ Settings", Tab::Settings),
+                    ("ℹ About", Tab::About),
+                ];
                 for (label, tab) in &tabs {
                     let is_active = self.active_tab == *tab;
-                    let btn = egui::Button::new(
-                        RichText::new(*label)
-                            .size(14.0)
-                            .color(if is_active {
-                                Color32::from_rgb(255, 200, 50)
-                            } else {
-                                Color32::from_rgb(160, 160, 180)
-                            }),
-                    )
-                    .fill(if is_active {
-                        Color32::from_rgb(40, 40, 55)
-                    } else {
-                        Color32::TRANSPARENT
-                    })
-                    .min_size(Vec2::new(90.0, 28.0));
+                    let btn =
+                        egui::Button::new(RichText::new(*label).size(14.0).color(if is_active {
+                            Color32::from_rgb(255, 200, 50)
+                        } else {
+                            Color32::from_rgb(160, 160, 180)
+                        }))
+                        .fill(if is_active {
+                            Color32::from_rgb(40, 40, 55)
+                        } else {
+                            Color32::TRANSPARENT
+                        })
+                        .min_size(Vec2::new(90.0, 28.0));
                     if ui.add(btn).clicked() {
                         self.active_tab = *tab;
                     }
@@ -350,212 +341,346 @@ impl Forge2kApp {
                 .min_width(240.0)
                 .show_inside(ui, |ui| {
                     ScrollArea::vertical().show(ui, |ui| {
-                        ui.add_space(4.0);
-                        ui.heading(RichText::new("Build Configuration").size(15.0).color(Color32::from_rgb(255, 200, 50)));
-                        ui.add_space(8.0);
-
-                        // Method
-                        ui.label(RichText::new("Build Method").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        egui::ComboBox::from_id_salt("method")
-                            .selected_text(&self.method)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.method, "spack".into(), "Spack (Docker, Ubuntu 24.04)");
-                                ui.selectable_value(&mut self.method, "toolchain".into(), "Toolchain (Docker, Ubuntu 22.04)");
-                                ui.selectable_value(&mut self.method, "native".into(), "Native (direct on host)");
-                            });
-                        ui.add_space(6.0);
-
-                        // Version
-                        ui.label(RichText::new("CP2K Version").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        let versions = match self.method.as_str() {
-                            "toolchain" => vec!["master", "2026.1", "2025.2", "2024.3", "2024.2", "2024.1", "2023.2"],
-                            "native" => vec!["master", "2026.1", "2025.2", "2024.3"],
-                            _ => vec!["2026.1", "2025.2", "2024.3", "2024.2"],
-                        };
-                        egui::ComboBox::from_id_salt("version")
-                            .selected_text(&self.version)
-                            .show_ui(ui, |ui| {
-                                for v in &versions {
-                                    ui.selectable_value(&mut self.version, v.to_string(), *v);
-                                }
-                            });
-                        ui.add_space(6.0);
-
-                        // MPI
-                        ui.label(RichText::new("MPI Implementation").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        let mpis = match self.method.as_str() {
-                            "toolchain" => vec!["mpich"],
-                            _ => vec!["mpich", "openmpi"],
-                        };
-                        egui::ComboBox::from_id_salt("mpi")
-                            .selected_text(&self.mpi)
-                            .show_ui(ui, |ui| {
-                                for m in &mpis {
-                                    ui.selectable_value(&mut self.mpi, m.to_string(), *m);
-                                }
-                            });
-                        ui.add_space(6.0);
-
-                        // CPU Target
-                        ui.label(RichText::new("CPU Target").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        let cpus: Vec<&str> = match self.method.as_str() {
-                            "toolchain" => vec!["generic"],
-                            _ => vec!["x86_64", "cascadelake", "haswell", "skylake-avx512", "generic"],
-                        };
-                        egui::ComboBox::from_id_salt("cpu")
-                            .selected_text(&self.cpu)
-                            .show_ui(ui, |ui| {
-                                for c in &cpus {
-                                    ui.selectable_value(&mut self.cpu, c.to_string(), *c);
-                                }
-                            });
-                        ui.add_space(6.0);
-
-                        // CUDA
-                        ui.label(RichText::new("CUDA Support").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        let cudas: Vec<&str> = match self.method.as_str() {
-                            "spack" => vec!["none"],
-                            _ => vec!["none", "P100", "V100"],
-                        };
-                        egui::ComboBox::from_id_salt("cuda")
-                            .selected_text(&self.cuda)
-                            .show_ui(ui, |ui| {
-                                for c in &cudas {
-                                    ui.selectable_value(&mut self.cuda, c.to_string(), *c);
-                                }
-                            });
-                        ui.add_space(6.0);
-
-                        // Variant
-                        ui.label(RichText::new("Binary Variant").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        egui::ComboBox::from_id_salt("variant")
-                            .selected_text(&self.variant)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.variant, "psmp".into(), "psmp (MPI+OpenMP)");
-                                ui.selectable_value(&mut self.variant, "ssmp".into(), "ssmp (OpenMP only)");
-                                ui.selectable_value(&mut self.variant, "pdbg".into(), "pdbg (MPI+OpenMP debug)");
-                                ui.selectable_value(&mut self.variant, "sdbg".into(), "sdbg (OpenMP debug)");
-                            });
-                        ui.add_space(6.0);
-
-                        // Jobs
-                        ui.label(RichText::new("Parallel Jobs (0 = auto)").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        ui.add(egui::TextEdit::singleline(&mut self.jobs).desired_width(80.0));
-                        ui.add_space(6.0);
-
-                        // SHM Size
-                        ui.label(RichText::new("Shared Memory Size").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        ui.add(egui::TextEdit::singleline(&mut self.shm_size).desired_width(80.0));
-                        ui.add_space(6.0);
-
-                        // Custom tag
-                        ui.label(RichText::new("Custom Image Tag (optional)").size(12.0).color(Color32::from_rgb(150, 150, 170)));
-                        ui.add(egui::TextEdit::singleline(&mut self.tag).desired_width(200.0).hint_text("auto-generate"));
-                        ui.add_space(12.0);
-
-                        // Build button
-                        ui.add_space(4.0);
-                        if is_building_val {
-                            let cancel_btn = egui::Button::new(
-                                RichText::new("⛔ CANCEL BUILD").size(14.0).color(Color32::from_rgb(255, 100, 100)),
-                            )
-                            .fill(Color32::from_rgb(60, 20, 20))
-                            .min_size(Vec2::new(240.0, 36.0));
-                            if ui.add(cancel_btn).clicked() {
-                                self.cancel_build();
-                            }
-                        } else {
-                            let build_btn = egui::Button::new(
-                                RichText::new("🔥 START BUILD").size(14.0).color(Color32::from_rgb(20, 20, 30)),
-                            )
-                            .fill(Color32::from_rgb(255, 200, 50))
-                            .min_size(Vec2::new(240.0, 36.0));
-                            if ui.add(build_btn).clicked() {
-                                self.check_docker();
-                                if self.docker_running {
-                                    self.start_build();
-                                } else {
-                                    // Will show error in log
-                                    let logs = self.build_logs.clone();
-                                    std::thread::spawn(move || {
-                                        let mut l = logs.lock().unwrap();
-                                        l.push(build::LogLine {
-                                            timestamp: "ERROR".into(),
-                                            text: "Docker is not running. Please start Docker first.".into(),
-                                            is_error: true,
-                                        });
-                                    });
-                                }
-                            }
-                        }
-
-                        // Build result status bar (outcome-driven)
-                        if let Some(outcome) = &*self.build_status.lock().unwrap() {
-                            ui.add_space(8.0);
-                            let (icon, text, color) = match outcome {
-                                build::BuildOutcome::Success => ("✅", "Build completed successfully.", Color32::from_rgb(100, 220, 120)),
-                                build::BuildOutcome::Failed => ("❌", "Build failed.", Color32::from_rgb(255, 100, 100)),
-                                build::BuildOutcome::Cancelled => ("⏹", "Build cancelled.", Color32::from_rgb(255, 200, 80)),
-                            };
-                            ui.label(RichText::new(format!("{} {}", icon, text)).color(color).size(12.0));
-                        }
-
-                        // Build error display
-                        if let Some(err) = &*self.build_error.lock().unwrap() {
-                            ui.add_space(8.0);
-                            ui.label(RichText::new(format!("❌ {}", err)).color(Color32::from_rgb(255, 100, 100)).size(11.0));
-                        }
+                        self.render_build_config_fields(ui);
+                        self.render_build_controls(ui, is_building_val);
                     });
                 });
 
             // ─── RIGHT: Build Log ───
             egui::CentralPanel::default().show_inside(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.heading(RichText::new("Build Output").size(15.0).color(Color32::from_rgb(255, 200, 50)));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.checkbox(&mut self.log_auto_scroll, "Auto-scroll");
-                        if ui.button("Clear").clicked() {
-                            self.build_logs.lock().unwrap().clear();
-                        }
-                    });
-                });
-                ui.add_space(4.0);
-
-                let logs = self.build_logs.lock().unwrap().clone();
-                let frame = egui::Frame::dark_canvas(ui.style()).fill(Color32::from_rgb(10, 10, 16));
-                frame.show(ui, |ui| {
-                    ScrollArea::vertical()
-                        .stick_to_bottom(self.log_auto_scroll && is_building_val)
-                        .show(ui, |ui| {
-                            ui.add_space(4.0);
-                            if logs.is_empty() {
-                                ui.label(RichText::new("  ⚡ Configure your build and click START BUILD")
-                                    .size(13.0).color(Color32::from_rgb(80, 80, 100)));
-                                ui.label(RichText::new("  Build logs will appear here in real-time.")
-                                    .size(12.0).color(Color32::from_rgb(60, 60, 80)));
-                            } else {
-                                for line in &logs {
-                                    let color = if line.is_error {
-                                        Color32::from_rgb(255, 100, 100)
-                                    } else if line.text.starts_with("✅") || line.text.starts_with("🚀") || line.text.starts_with("📋") {
-                                        Color32::from_rgb(100, 220, 130)
-                                    } else if line.text.starts_with("⚠") || line.text.starts_with("⏹") {
-                                        Color32::from_rgb(255, 200, 80)
-                                    } else {
-                                        Color32::from_rgb(180, 185, 195)
-                                    };
-                                    ui.label(
-                                        RichText::new(format!("  {}", line.text))
-                                            .size(12.0)
-                                            .family(egui::FontFamily::Monospace)
-                                            .color(color),
-                                    );
-                                }
-                            }
-                            ui.add_space(4.0);
-                        });
-                });
+                self.render_build_log_panel(ui, is_building_val);
             });
+        });
+    }
+
+    /// Configuration area of the Build tab: method/version/mpi/cpu/cuda/
+    /// variant combos and jobs/shm/tag inputs.
+    fn render_build_config_fields(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.heading(
+            RichText::new("Build Configuration")
+                .size(15.0)
+                .color(Color32::from_rgb(255, 200, 50)),
+        );
+        ui.add_space(8.0);
+
+        // Method
+        ui.label(
+            RichText::new("Build Method")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        egui::ComboBox::from_id_salt("method")
+            .selected_text(&self.method)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.method,
+                    "spack".into(),
+                    "Spack (Docker, Ubuntu 24.04)",
+                );
+                ui.selectable_value(
+                    &mut self.method,
+                    "toolchain".into(),
+                    "Toolchain (Docker, Ubuntu 22.04)",
+                );
+                ui.selectable_value(&mut self.method, "native".into(), "Native (direct on host)");
+            });
+        ui.add_space(6.0);
+
+        // Version (same source as the CLI: build::list_available_configs;
+        // native builds are host-local and keep their own list)
+        ui.label(
+            RichText::new("CP2K Version")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        let docker_configs = if self.method == "native" {
+            Vec::new()
+        } else {
+            build::list_available_configs()
+                .into_iter()
+                .filter(|c| c.method == self.method)
+                .collect::<Vec<_>>()
+        };
+        let versions: Vec<String> = if self.method == "native" {
+            vec!["master", "2026.1", "2025.2", "2024.3"]
+                .into_iter()
+                .map(String::from)
+                .collect()
+        } else {
+            let mut vs: Vec<String> = docker_configs.iter().map(|c| c.version.clone()).collect();
+            vs.sort();
+            vs.dedup();
+            vs
+        };
+        let selected_is_synthesized = self.method != "native"
+            && docker_configs.iter().any(|c| {
+                c.version == self.version && c.source == build::DockerfileSource::Synthesized
+            });
+        egui::ComboBox::from_id_salt("version")
+            .selected_text(&self.version)
+            .show_ui(ui, |ui| {
+                for v in &versions {
+                    ui.selectable_value(&mut self.version, v.clone(), v);
+                }
+            });
+        if selected_is_synthesized {
+            ui.label(
+                RichText::new("synthesized: no bundled Dockerfile, generated at build time")
+                    .size(10.0)
+                    .color(Color32::from_rgb(255, 200, 80)),
+            );
+        }
+        ui.add_space(6.0);
+
+        // MPI
+        ui.label(
+            RichText::new("MPI Implementation")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        let mpis = match self.method.as_str() {
+            "toolchain" => vec!["mpich"],
+            _ => vec!["mpich", "openmpi"],
+        };
+        egui::ComboBox::from_id_salt("mpi")
+            .selected_text(&self.mpi)
+            .show_ui(ui, |ui| {
+                for m in &mpis {
+                    ui.selectable_value(&mut self.mpi, m.to_string(), *m);
+                }
+            });
+        ui.add_space(6.0);
+
+        // CPU Target
+        ui.label(
+            RichText::new("CPU Target")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        let cpus: Vec<&str> = match self.method.as_str() {
+            "toolchain" => vec!["generic"],
+            _ => vec![
+                "x86_64",
+                "cascadelake",
+                "haswell",
+                "skylake-avx512",
+                "generic",
+            ],
+        };
+        egui::ComboBox::from_id_salt("cpu")
+            .selected_text(&self.cpu)
+            .show_ui(ui, |ui| {
+                for c in &cpus {
+                    ui.selectable_value(&mut self.cpu, c.to_string(), *c);
+                }
+            });
+        ui.add_space(6.0);
+
+        // CUDA
+        ui.label(
+            RichText::new("CUDA Support")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        let cudas: Vec<&str> = match self.method.as_str() {
+            "spack" => vec!["none"],
+            _ => vec!["none", "P100", "V100"],
+        };
+        egui::ComboBox::from_id_salt("cuda")
+            .selected_text(&self.cuda)
+            .show_ui(ui, |ui| {
+                for c in &cudas {
+                    ui.selectable_value(&mut self.cuda, c.to_string(), *c);
+                }
+            });
+        ui.add_space(6.0);
+
+        // Variant
+        ui.label(
+            RichText::new("Binary Variant")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        egui::ComboBox::from_id_salt("variant")
+            .selected_text(&self.variant)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.variant, "psmp".into(), "psmp (MPI+OpenMP)");
+                ui.selectable_value(&mut self.variant, "ssmp".into(), "ssmp (OpenMP only)");
+                ui.selectable_value(&mut self.variant, "pdbg".into(), "pdbg (MPI+OpenMP debug)");
+                ui.selectable_value(&mut self.variant, "sdbg".into(), "sdbg (OpenMP debug)");
+            });
+        ui.add_space(6.0);
+
+        // Jobs
+        ui.label(
+            RichText::new("Parallel Jobs (0 = auto)")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        ui.add(egui::TextEdit::singleline(&mut self.jobs).desired_width(80.0));
+        ui.add_space(6.0);
+
+        // SHM Size
+        ui.label(
+            RichText::new("Shared Memory Size")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        ui.add(egui::TextEdit::singleline(&mut self.shm_size).desired_width(80.0));
+        ui.add_space(6.0);
+
+        // Custom tag
+        ui.label(
+            RichText::new("Custom Image Tag (optional)")
+                .size(12.0)
+                .color(Color32::from_rgb(150, 150, 170)),
+        );
+        ui.add(
+            egui::TextEdit::singleline(&mut self.tag)
+                .desired_width(200.0)
+                .hint_text("auto-generate"),
+        );
+        ui.add_space(12.0);
+    }
+
+    /// Control area of the Build tab: start/cancel button, outcome status
+    /// bar and build error display.
+    fn render_build_controls(&mut self, ui: &mut egui::Ui, is_building_val: bool) {
+        // Build button
+        ui.add_space(4.0);
+        if is_building_val {
+            let cancel_btn = egui::Button::new(
+                RichText::new("⛔ CANCEL BUILD")
+                    .size(14.0)
+                    .color(Color32::from_rgb(255, 100, 100)),
+            )
+            .fill(Color32::from_rgb(60, 20, 20))
+            .min_size(Vec2::new(240.0, 36.0));
+            if ui.add(cancel_btn).clicked() {
+                self.cancel_build();
+            }
+        } else {
+            let build_btn = egui::Button::new(
+                RichText::new("🔥 START BUILD")
+                    .size(14.0)
+                    .color(Color32::from_rgb(20, 20, 30)),
+            )
+            .fill(Color32::from_rgb(255, 200, 50))
+            .min_size(Vec2::new(240.0, 36.0));
+            if ui.add(build_btn).clicked() {
+                self.check_docker();
+                if self.docker_running {
+                    self.start_build();
+                } else {
+                    // Will show error in log
+                    let logs = self.build_logs.clone();
+                    std::thread::spawn(move || {
+                        let mut l = logs.lock().unwrap();
+                        l.push(build::LogLine {
+                            timestamp: "ERROR".into(),
+                            text: "Docker is not running. Please start Docker first.".into(),
+                            is_error: true,
+                        });
+                    });
+                }
+            }
+        }
+
+        // Build result status bar (outcome-driven)
+        if let Some(outcome) = &*self.build_status.lock().unwrap() {
+            ui.add_space(8.0);
+            let (icon, text, color) = match outcome {
+                build::BuildOutcome::Success => (
+                    "✅",
+                    "Build completed successfully.",
+                    Color32::from_rgb(100, 220, 120),
+                ),
+                build::BuildOutcome::Failed => {
+                    ("❌", "Build failed.", Color32::from_rgb(255, 100, 100))
+                }
+                build::BuildOutcome::Cancelled => {
+                    ("⏹", "Build cancelled.", Color32::from_rgb(255, 200, 80))
+                }
+            };
+            ui.label(
+                RichText::new(format!("{} {}", icon, text))
+                    .color(color)
+                    .size(12.0),
+            );
+        }
+
+        // Build error display
+        if let Some(err) = &*self.build_error.lock().unwrap() {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new(format!("❌ {}", err))
+                    .color(Color32::from_rgb(255, 100, 100))
+                    .size(11.0),
+            );
+        }
+    }
+
+    /// Log area of the Build tab: output header with auto-scroll/clear
+    /// controls and the scrolling log view.
+    fn render_build_log_panel(&mut self, ui: &mut egui::Ui, is_building_val: bool) {
+        ui.horizontal(|ui| {
+            ui.heading(
+                RichText::new("Build Output")
+                    .size(15.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.checkbox(&mut self.log_auto_scroll, "Auto-scroll");
+                if ui.button("Clear").clicked() {
+                    self.build_logs.lock().unwrap().clear();
+                }
+            });
+        });
+        ui.add_space(4.0);
+
+        let logs = self.build_logs.lock().unwrap().clone();
+        let frame = egui::Frame::dark_canvas(ui.style()).fill(Color32::from_rgb(10, 10, 16));
+        frame.show(ui, |ui| {
+            ScrollArea::vertical()
+                .stick_to_bottom(self.log_auto_scroll && is_building_val)
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    if logs.is_empty() {
+                        ui.label(
+                            RichText::new("  ⚡ Configure your build and click START BUILD")
+                                .size(13.0)
+                                .color(Color32::from_rgb(80, 80, 100)),
+                        );
+                        ui.label(
+                            RichText::new("  Build logs will appear here in real-time.")
+                                .size(12.0)
+                                .color(Color32::from_rgb(60, 60, 80)),
+                        );
+                    } else {
+                        for line in &logs {
+                            let color = if line.is_error {
+                                Color32::from_rgb(255, 100, 100)
+                            } else if line.text.starts_with("✅")
+                                || line.text.starts_with("🚀")
+                                || line.text.starts_with("📋")
+                            {
+                                Color32::from_rgb(100, 220, 130)
+                            } else if line.text.starts_with("⚠") || line.text.starts_with("⏹") {
+                                Color32::from_rgb(255, 200, 80)
+                            } else {
+                                Color32::from_rgb(180, 185, 195)
+                            };
+                            ui.label(
+                                RichText::new(format!("  {}", line.text))
+                                    .size(12.0)
+                                    .family(egui::FontFamily::Monospace)
+                                    .color(color),
+                            );
+                        }
+                    }
+                    ui.add_space(4.0);
+                });
         });
     }
 
@@ -564,7 +689,11 @@ impl Forge2kApp {
             ui.add_space(8.0);
 
             // Docker Status Card
-            ui.heading(RichText::new("🐳 Docker Engine").size(16.0).color(Color32::from_rgb(255, 200, 50)));
+            ui.heading(
+                RichText::new("🐳 Docker Engine")
+                    .size(16.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
             ui.add_space(6.0);
 
             let docker_card = egui::Frame::group(ui.style())
@@ -574,14 +703,34 @@ impl Forge2kApp {
                 ui.horizontal(|ui| {
                     if self.docker_checked {
                         if self.docker_running {
-                            ui.label(RichText::new("●").color(Color32::from_rgb(80, 220, 100)).size(20.0));
-                            ui.label(RichText::new("Running").color(Color32::from_rgb(80, 220, 100)).strong());
+                            ui.label(
+                                RichText::new("●")
+                                    .color(Color32::from_rgb(80, 220, 100))
+                                    .size(20.0),
+                            );
+                            ui.label(
+                                RichText::new("Running")
+                                    .color(Color32::from_rgb(80, 220, 100))
+                                    .strong(),
+                            );
                         } else {
-                            ui.label(RichText::new("●").color(Color32::from_rgb(220, 80, 80)).size(20.0));
-                            ui.label(RichText::new("Not Running").color(Color32::from_rgb(220, 80, 80)).strong());
+                            ui.label(
+                                RichText::new("●")
+                                    .color(Color32::from_rgb(220, 80, 80))
+                                    .size(20.0),
+                            );
+                            ui.label(
+                                RichText::new("Not Running")
+                                    .color(Color32::from_rgb(220, 80, 80))
+                                    .strong(),
+                            );
                         }
                     } else {
-                        ui.label(RichText::new("○").color(Color32::from_rgb(120, 120, 140)).size(20.0));
+                        ui.label(
+                            RichText::new("○")
+                                .color(Color32::from_rgb(120, 120, 140))
+                                .size(20.0),
+                        );
                         ui.label("Not checked");
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -599,7 +748,11 @@ impl Forge2kApp {
             ui.add_space(16.0);
 
             // Registry Status Card
-            ui.heading(RichText::new("🌐 Docker Registry").size(16.0).color(Color32::from_rgb(255, 200, 50)));
+            ui.heading(
+                RichText::new("🌐 Docker Registry")
+                    .size(16.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
             ui.add_space(6.0);
 
             let reg_card = egui::Frame::group(ui.style())
@@ -616,22 +769,32 @@ impl Forge2kApp {
                 });
                 ui.add_space(4.0);
                 if !self.current_mirror.is_empty() {
-                    ui.label(RichText::new(format!("Mirror: {}", self.current_mirror))
-                        .color(Color32::from_rgb(100, 180, 255)));
+                    ui.label(
+                        RichText::new(format!("Mirror: {}", self.current_mirror))
+                            .color(Color32::from_rgb(100, 180, 255)),
+                    );
                 }
             });
 
             ui.add_space(16.0);
 
             // Installation guide
-            ui.heading(RichText::new("📖 Docker Installation Guide").size(16.0).color(Color32::from_rgb(255, 200, 50)));
+            ui.heading(
+                RichText::new("📖 Docker Installation Guide")
+                    .size(16.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
             ui.add_space(6.0);
 
             let guide_frame = egui::Frame::group(ui.style())
                 .fill(Color32::from_rgb(28, 28, 38))
                 .corner_radius(8.0);
             guide_frame.show(ui, |ui| {
-                ui.label(RichText::new("Docker is required to build CP2K images.").size(12.0).color(Color32::from_rgb(150, 150, 170)));
+                ui.label(
+                    RichText::new("Docker is required to build CP2K images.")
+                        .size(12.0)
+                        .color(Color32::from_rgb(150, 150, 170)),
+                );
                 ui.add_space(4.0);
                 if ui.button("📋 Show Installation Guide").clicked() {
                     build::print_docker_install_guide();
@@ -641,7 +804,11 @@ impl Forge2kApp {
             ui.add_space(16.0);
 
             // Quick Help
-            ui.heading(RichText::new("💡 Quick Tips").size(16.0).color(Color32::from_rgb(255, 200, 50)));
+            ui.heading(
+                RichText::new("💡 Quick Tips")
+                    .size(16.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
             ui.add_space(6.0);
 
             let tips_frame = egui::Frame::group(ui.style())
@@ -661,9 +828,15 @@ impl Forge2kApp {
         ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(8.0);
 
-            ui.heading(RichText::new("⚙ Docker Registry Mirror").size(16.0).color(Color32::from_rgb(255, 200, 50)));
+            ui.heading(
+                RichText::new("⚙ Docker Registry Mirror")
+                    .size(16.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
             ui.add_space(4.0);
-            ui.label("Configure a registry mirror to speed up Docker pulls in restricted networks.");
+            ui.label(
+                "Configure a registry mirror to speed up Docker pulls in restricted networks.",
+            );
             ui.add_space(8.0);
 
             let settings_card = egui::Frame::group(ui.style())
@@ -678,18 +851,22 @@ impl Forge2kApp {
                             .hint_text("https://docker.mirrors.ustc.edu.cn"),
                     );
                     if ui.button("Apply").clicked() {
-                        if self.mirror_input.starts_with("http://") || self.mirror_input.starts_with("https://") {
+                        if self.mirror_input.starts_with("http://")
+                            || self.mirror_input.starts_with("https://")
+                        {
                             match build::set_registry_mirror(&self.mirror_input) {
                                 Ok(()) => {
                                     self.current_mirror = self.mirror_input.clone();
-                                    self.settings_message = "✅ Mirror configured! Restart Docker to apply.".into();
+                                    self.settings_message =
+                                        "✅ Mirror configured! Restart Docker to apply.".into();
                                 }
                                 Err(e) => {
                                     self.settings_message = format!("❌ Failed: {}", e);
                                 }
                             }
                         } else {
-                            self.settings_message = "❌ Invalid URL. Must start with http:// or https://".into();
+                            self.settings_message =
+                                "❌ Invalid URL. Must start with http:// or https://".into();
                         }
                     }
                 });
@@ -701,7 +878,8 @@ impl Forge2kApp {
                             self.mirror_input = url.clone();
                             self.settings_message = format!("✅ Found working mirror: {}", url);
                         } else {
-                            self.settings_message = "❌ No working mirror found. Try a manual URL.".into();
+                            self.settings_message =
+                                "❌ No working mirror found. Try a manual URL.".into();
                         }
                     }
                     ui.add_space(8.0);
@@ -709,7 +887,8 @@ impl Forge2kApp {
                         match build::remove_registry_mirror() {
                             Ok(()) => {
                                 self.current_mirror.clear();
-                                self.settings_message = "✅ Mirror removed. Restart Docker to apply.".into();
+                                self.settings_message =
+                                    "✅ Mirror removed. Restart Docker to apply.".into();
                             }
                             Err(e) => {
                                 self.settings_message = format!("❌ Failed: {}", e);
@@ -726,31 +905,40 @@ impl Forge2kApp {
 
             ui.add_space(8.0);
             if !self.current_mirror.is_empty() {
-                ui.label(RichText::new(format!("Current mirror: {}", self.current_mirror))
-                    .color(Color32::from_rgb(100, 180, 255)));
+                ui.label(
+                    RichText::new(format!("Current mirror: {}", self.current_mirror))
+                        .color(Color32::from_rgb(100, 180, 255)),
+                );
             }
 
             ui.add_space(24.0);
 
             // Known mirrors
-            ui.heading(RichText::new("Known Public Mirrors").size(14.0).color(Color32::from_rgb(255, 200, 50)));
+            ui.heading(
+                RichText::new("Known Public Mirrors")
+                    .size(14.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
             ui.add_space(4.0);
-            let known_mirrors = [
-                ("USTC", "https://docker.mirrors.ustc.edu.cn", "China - University of Science and Technology"),
-                ("Tencent Cloud", "https://mirror.ccs.tencentyun.com", "China - Tencent Cloud"),
-                ("DaoCloud", "https://2a59f68c.m.daocloud.io", "China - DaoCloud"),
-                ("Docker CN", "https://registry.docker-cn.com", "China - Docker Official CN Mirror"),
-                ("DockerHub Proxy", "https://dockerhub.timeweb.cloud", "Russia - Timeweb Cloud"),
-            ];
+            let known_mirrors = crate::mirrors::known_mirrors();
             let mirror_frame = egui::Frame::group(ui.style())
                 .fill(Color32::from_rgb(28, 28, 38))
                 .corner_radius(8.0);
             mirror_frame.show(ui, |ui| {
-                for (name, url, desc) in &known_mirrors {
+                for m in known_mirrors {
+                    let (name, url, desc) = (m.name, m.url, m.desc);
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new(*name).strong().size(12.0));
-                        ui.label(RichText::new(*url).color(Color32::from_rgb(100, 180, 255)).size(12.0));
-                        ui.label(RichText::new(*desc).color(Color32::from_rgb(120, 120, 140)).size(11.0));
+                        ui.label(RichText::new(name).strong().size(12.0));
+                        ui.label(
+                            RichText::new(url)
+                                .color(Color32::from_rgb(100, 180, 255))
+                                .size(12.0),
+                        );
+                        ui.label(
+                            RichText::new(desc)
+                                .color(Color32::from_rgb(120, 120, 140))
+                                .size(11.0),
+                        );
                         if ui.button("Use").clicked() {
                             self.mirror_input = url.to_string();
                         }
@@ -764,8 +952,17 @@ impl Forge2kApp {
         ui.add_space(16.0);
 
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("🔥 Forge2K").size(32.0).color(Color32::from_rgb(255, 200, 50)).strong());
-            ui.label(RichText::new("Version 1.0.0").size(14.0).color(Color32::from_rgb(120, 120, 140)));
+            ui.label(
+                RichText::new("🔥 Forge2K")
+                    .size(32.0)
+                    .color(Color32::from_rgb(255, 200, 50))
+                    .strong(),
+            );
+            ui.label(
+                RichText::new("Version 1.0.0")
+                    .size(14.0)
+                    .color(Color32::from_rgb(120, 120, 140)),
+            );
             ui.add_space(8.0);
             ui.label(RichText::new("One-click CP2K Docker Image Builder").size(16.0));
             ui.add_space(16.0);
@@ -790,10 +987,19 @@ impl Forge2kApp {
             }
 
             ui.add_space(16.0);
-            ui.label(RichText::new("Powered by Rust  •  egui  •  Docker").color(Color32::from_rgb(100, 100, 120)));
-            ui.label(RichText::new("Inspired by github.com/cp2k/cp2k-containers").color(Color32::from_rgb(80, 80, 100)));
+            ui.label(
+                RichText::new("Powered by Rust  •  egui  •  Docker")
+                    .color(Color32::from_rgb(100, 100, 120)),
+            );
+            ui.label(
+                RichText::new("Inspired by github.com/cp2k/cp2k-containers")
+                    .color(Color32::from_rgb(80, 80, 100)),
+            );
             ui.add_space(8.0);
-            ui.label(RichText::new("Made with ❤️ for the computational chemistry community").color(Color32::from_rgb(120, 120, 140)));
+            ui.label(
+                RichText::new("Made with ❤️ for the computational chemistry community")
+                    .color(Color32::from_rgb(120, 120, 140)),
+            );
         });
     }
 }
