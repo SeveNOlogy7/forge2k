@@ -33,17 +33,19 @@ RUN /bin/bash -c -o pipefail \
      make -j 8 ARCH=local VERSION=psmp"
 
 # Collect components for installation and remove symbolic links
+# NOTE: $-signs are escaped so that the outer /bin/sh passes them through to
+# bash verbatim; otherwise dash expands $3/${libdir} to empty before bash runs.
 RUN /bin/bash -c -o pipefail \
     "mkdir -p /toolchain/install /toolchain/scripts; \
-     for libdir in $(ldd ./exe/local/cp2k.psmp | \
+     for libdir in \$(ldd ./exe/local/cp2k.psmp | \
                       grep /opt/cp2k/tools/toolchain/install | \
-                      awk '{print $3}' | cut -d/ -f7 | \
+                      awk '{print \$3}' | cut -d/ -f7 | \
                       sort | uniq) setup; do \
-        cp -ar /opt/cp2k/tools/toolchain/install/${libdir} /toolchain/install; \
+        cp -ar /opt/cp2k/tools/toolchain/install/\${libdir} /toolchain/install; \
      done; \
      cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts; \
-     unlink ./exe/local/cp2k.popt; \
-     unlink ./exe/local/cp2k_shell.psmp"
+     rm -f ./exe/local/cp2k.popt; \
+     rm -f ./exe/local/cp2k_shell.psmp"
 
 # Stage 2: install step
 FROM ubuntu:22.04 AS install
@@ -67,10 +69,12 @@ COPY --from=build /opt/cp2k/data/ /opt/cp2k/data/
 COPY --from=build /toolchain/ /opt/cp2k/tools/toolchain/
 
 # Create links to CP2K binaries
+# NOTE: ${binary} is escaped so the outer /bin/sh passes it through to bash;
+# otherwise dash expands it to empty and no links are created.
 RUN /bin/bash -c -o pipefail \
     "for binary in cp2k dumpdcd graph xyz2dcd; do \
-        ln -sf /opt/cp2k/exe/local/${binary}.psmp \
-               /usr/local/bin/${binary}; \
+        ln -sf /opt/cp2k/exe/local/\${binary}.psmp \
+               /usr/local/bin/\${binary}; \
      done; \
      ln -sf /opt/cp2k/exe/local/cp2k.psmp \
             /usr/local/bin/cp2k_shell; \
@@ -81,7 +85,7 @@ RUN /bin/bash -c -o pipefail \
 RUN printf "#!/bin/bash\n\
 ulimit -c 0\n\
 export PATH=/opt/cp2k/exe/local:\${PATH}\n\
-export LD_LIBRARY_PATH=/opt/cp2k/tools/toolchain/install/lib:\${LD_LIBRARY_PATH}\n\
+source /opt/cp2k/tools/toolchain/install/setup\n\
 exec \"\$@\"\n" > /entrypoint.sh && chmod a+x /entrypoint.sh
 
 WORKDIR /work

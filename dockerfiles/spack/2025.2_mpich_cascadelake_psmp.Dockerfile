@@ -85,54 +85,102 @@ ENV SPACK_ENV_VIEW="${SPACK_ROOT}/var/spack/environments/myenv/spack-env/view"
 RUN spack -e myenv env depfile -o spack_makefile && \
     make -j${NUM_PROCS} --file=spack_makefile SPACK_COLOR=never --output-sync=recurse
 
-# Build CP2K
+# Export the Spack environment view for the CMake build
+RUN cp -ar ${SPACK_ENV_VIEW}/bin ${SPACK_ENV_VIEW}/include ${SPACK_ENV_VIEW}/lib /opt/spack
+
+# Run CMake
 WORKDIR /opt/cp2k
-RUN cp /opt/cp2k/tools/spack/spack_env_relocate.sh . && \
-    cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/arch_name.patch . && \
-    cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/check_gpu_arch_fix.patch . && \
-    cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/rng_fixes.patch . && \
-    cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/valgrind_fixes.patch . && \
-    cp -r /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/spack_batch_relocate.sh . && \
-    cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/relocate_cp2k_binary.sh . && \
-    cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/relocate_spack_env.sh . && \
-    cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/relocate_spack_env_tcl.sh . && \
-    source ${SPACK_ROOT}/share/spack/setup-env.sh && \
-    spack env activate myenv && \
-    spack build-env -- spack install --source cp2k@${CP2K_VERSION}
+RUN /bin/bash -c -o pipefail "source ./cmake/cmake_cp2k.sh spack_all ${CP2K_VERSION}"
 
-# Post-install relocation to fix RPATHs
-RUN source ${SPACK_ROOT}/share/spack/setup-env.sh && \
-    spack env activate myenv && \
-    bash ./relocate_spack_env.sh $(spack env activate --sh myenv | grep CP2K_SPACK_ENV | cut -d= -f2) /opt/cp2k/install
+# Compile CP2K for target CPU cascadelake
+ARG LOG_LINES
+ENV LOG_LINES=${LOG_LINES:-200}
+WORKDIR /opt/cp2k/build
+RUN /bin/bash -c -o pipefail " \
+    echo -e '\nCompiling CP2K ... \c'; \
+    if ninja --verbose &>ninja.log; then \
+      echo -e 'done\n'; \
+      echo -e 'Installing CP2K ... \c'; \
+      if ninja --verbose install &>install.log; then \
+        echo -e 'done\n'; \
+      else \
+        echo -e 'failed\n'; \
+        tail -n ${LOG_LINES} install.log; \
+        exit 1; \
+      fi; \
+      cat cmake.log ninja.log install.log | gzip >build_cp2k.log.gz; \
+    else \
+      echo -e 'failed\n'; \
+      tail -n ${LOG_LINES} ninja.log; \
+      cat cmake.log ninja.log | gzip >build_cp2k.log.gz; \
+      exit 1; \
+    fi"
 
-# Stage 2: runtime stage
+# Store build arguments from base image needed in next stage
+RUN echo "${CP2K_VERSION}" >/CP2K_VERSION
+
+# Stage 2: Install CP2K
 FROM ${BASE_IMAGE} AS runtime
 
-# Install runtime dependencies
+# Install required packages
 RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
-    g++ gcc gfortran openssh-client python3 \
-    ca-certificates \
-    libgomp1 \
-    libopenblas-dev \
-    libmpich-dev \
-    libpython3-dev \
-    libstdc++-13-dev \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
+    g++ gcc gfortran python3 && rm -rf /var/lib/apt/lists/*
 
-# Copy CP2K installation from build stage
-COPY --from=build_cp2k /opt/cp2k/install /opt/cp2k
-COPY --from=build_cp2k /opt/cp2k/exe /opt/cp2k/exe
-COPY --from=build_cp2k /opt/cp2k/data /opt/cp2k/data
-COPY --from=build_cp2k /opt/cp2k/tests /opt/cp2k/tests
+# Import build arguments from base image
+COPY --from=build_cp2k /CP2K_VERSION /
 
-# Create symbolic links for CP2K binaries
-RUN ln -sf /opt/cp2k/exe/local/cp2k.psmp /usr/local/bin/cp2k && \
-    ln -sf /opt/cp2k/exe/local/cp2k_shell.psmp /usr/local/bin/cp2k_shell
+# Install CP2K dependencies built with Spack
+WORKDIR /opt
+COPY --from=build_cp2k /opt/spack ./spack
 
-ENV PATH="/opt/cp2k/exe/local:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/cp2k/lib:${LD_LIBRARY_PATH}"
+# Install CP2K binaries
+WORKDIR /opt/cp2k
+COPY --from=build_cp2k /opt/cp2k/bin ./bin
 
-WORKDIR /work
+# Install CP2K libraries
+COPY --from=build_cp2k /opt/cp2k/lib ./lib
 
-ENTRYPOINT ["cp2k"]
+# Install CP2K database files
+COPY --from=build_cp2k /opt/cp2k/share ./share
+
+# Install CP2K regression tests
+COPY --from=build_cp2k /opt/cp2k/tests ./tests
+COPY --from=build_cp2k /opt/cp2k/src/grid/sample_tasks ./src/grid/sample_tasks
+
+# Install CP2K/Quickstep CI benchmarks
+COPY --from=build_cp2k /opt/cp2k/benchmarks/CI ./benchmarks/CI
+
+# Import compressed build log file
+COPY --from=build_cp2k /opt/cp2k/build/build_cp2k.log.gz /opt/cp2k/build/build_cp2k.log.gz
+
+# Create links to CP2K binaries
+WORKDIR /opt/cp2k/bin
+RUN CP2K_VERSION=$(cat /CP2K_VERSION) && \
+    ln -sf cp2k.${CP2K_VERSION} cp2k && \
+    ln -sf cp2k.${CP2K_VERSION} cp2k.$(echo ${CP2K_VERSION} | sed "s/smp/opt/") && \
+    ln -sf cp2k.${CP2K_VERSION} cp2k_shell && \
+    ln -sf dumpdcd.${CP2K_VERSION} dumpdcd && \
+    ln -sf graph.${CP2K_VERSION} graph && \
+    ln -sf xyz2dcd.${CP2K_VERSION} xyz2dcd
+
+# Update library search path
+RUN echo "/opt/cp2k/lib\n/opt/spack/lib\n/opt/spack/lib/python3.12/site-packages/torch/lib" >/etc/ld.so.conf.d/cp2k.conf && ldconfig
+
+# Create entrypoint script file
+RUN printf "#!/bin/bash\n\
+ulimit -c 0 -s unlimited\n\
+export OMP_STACKSIZE=64M\n\
+export PATH=/opt/cp2k/bin:/opt/spack/bin:\${PATH}\n\
+\"\$@\"" \
+>/opt/cp2k/bin/entrypoint.sh && chmod 755 /opt/cp2k/bin/entrypoint.sh
+
+# Create shortcut for regression test
+RUN printf "/opt/cp2k/tests/do_regtest.py \$* /opt/cp2k/bin $(cat /CP2K_VERSION)" \
+>/opt/cp2k/bin/run_tests && chmod 755 /opt/cp2k/bin/run_tests
+
+# Define entrypoint
+WORKDIR /mnt
+ENTRYPOINT ["/opt/cp2k/bin/entrypoint.sh"]
+CMD ["cp2k", "--help"]
+
+# EOF
