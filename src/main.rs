@@ -86,10 +86,6 @@ enum Commands {
         #[arg(long = "shm-size", default_value = "1g")]
         shm_size: String,
 
-        /// Output format: docker (local image) or image (tarball)
-        #[arg(short = 'o', long = "output", default_value = "docker")]
-        output: String,
-
         /// Skip Docker engine check
         #[arg(long = "force")]
         force: bool,
@@ -191,11 +187,10 @@ fn main() -> Result<()> {
             no_cache,
             dockerfile,
             shm_size,
-            output,
             force,
         } => cmd_build(
             method, version, mpi, cpu, cuda, variant, jobs, tag, no_cache, dockerfile, shm_size,
-            output, force,
+            force,
         ),
         Commands::List { method, version } => cmd_list(method, version),
         Commands::Gui => cmd_gui(),
@@ -225,9 +220,6 @@ fn cmd_build(
     no_cache: bool,
     dockerfile: Option<String>,
     shm_size: String,
-    // Accepted for CLI compatibility; the output format is not consumed
-    // anywhere yet (dead field `_output` was removed).
-    _output: String,
     force: bool,
 ) -> Result<()> {
     print_banner();
