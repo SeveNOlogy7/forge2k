@@ -60,7 +60,7 @@ impl Default for Forge2kApp {
         let current_mirror = build::get_registry_mirror().unwrap_or_default();
         Self {
             method: "spack".into(),
-            version: "2025.2".into(),
+            version: "2026.1".into(),
             mpi: "mpich".into(),
             cpu: "x86_64".into(),
             cuda: "none".into(),
@@ -147,7 +147,13 @@ impl Forge2kApp {
 
         // Spawn build thread
         std::thread::spawn(move || {
-            let result = build::execute_build(&config, tx, cancel);
+            // Route by build method: native builds run directly on the host
+            // (execute_native_build), everything else goes through Docker
+            // (execute_build with a bundled or synthesized Dockerfile).
+            let result = match config.method.as_str() {
+                "native" => build::execute_native_build(&config, tx.clone(), cancel),
+                _ => build::execute_build(&config, tx, cancel),
+            };
             match result {
                 Ok(build::BuildOutcome::Success) => {
                     *status.lock().unwrap() = Some(build::BuildOutcome::Success);

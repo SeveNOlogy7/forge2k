@@ -647,13 +647,63 @@ fn restart_docker() -> Result<()> {
             .args(["/F", "/IM", "Docker Desktop.exe"])
             .output();
         std::thread::sleep(std::time::Duration::from_secs(3));
+
         println!("  Starting Docker Desktop...");
-        let _ = std::process::Command::new("start")
-            .arg("Docker Desktop")
-            .spawn();
-        println!("  Waiting for Docker to start...");
-        std::thread::sleep(std::time::Duration::from_secs(10));
-        Ok(())
+        // "start" is a cmd builtin, not an executable: spawning it directly
+        // always fails with a program-not-found OS error. Wrap it in
+        // `cmd /C` and check the result so success/failure is visible.
+        let exe = std::path::Path::new(r"C:\Program Files\Docker\Docker\Docker Desktop.exe");
+        let launch = if exe.exists() {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", exe.to_str().unwrap_or("Docker Desktop")])
+                .output()
+        } else {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", "Docker Desktop"])
+                .output()
+        };
+        match launch {
+            Ok(out) if out.status.success() => {
+                println!("  Docker Desktop launch requested.");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                return Err(anyhow::anyhow!(
+                    "Failed to launch Docker Desktop (exit code {:?}{}). \
+                     Start it manually from the Start menu or system tray, then re-run this command.",
+                    out.status.code(),
+                    if stderr.is_empty() { String::new() } else { format!(": {}", stderr) }
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Failed to launch Docker Desktop: {}. \
+                     Start it manually from the Start menu or system tray, then re-run this command.",
+                    e
+                ));
+            }
+        }
+
+        println!("  Waiting for Docker engine to come up...");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let up = std::process::Command::new("docker")
+                .arg("version")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains("Server:"))
+                .unwrap_or(false);
+            if up {
+                println!("  Docker engine is up.");
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow::anyhow!(
+                    "Docker engine did not come up within 60s after launching Docker Desktop. \
+                     Check that Docker Desktop is running and the engine has started, then re-run this command."
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
     }
 
     #[cfg(not(target_os = "windows"))]

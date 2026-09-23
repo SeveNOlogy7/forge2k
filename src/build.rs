@@ -82,6 +82,17 @@ impl BuildConfig {
             return Err(anyhow!("Custom Dockerfile not found: {}", df.display()));
         }
 
+        if let Some(path) = self.find_bundled_dockerfile() {
+            return Ok(path);
+        }
+
+        // If no bundled file found, we'll generate one at runtime
+        let generated = self.generate_dockerfile()?;
+        Ok(generated)
+    }
+
+    /// Find a bundled Dockerfile matching this configuration, if one exists.
+    fn find_bundled_dockerfile(&self) -> Option<PathBuf> {
         // Look for bundled Dockerfiles relative to the executable
         let exe_dir = std::env::current_exe()
             .ok()
@@ -99,13 +110,11 @@ impl BuildConfig {
         for base in &search_paths {
             let path = base.join(&filename);
             if path.exists() {
-                return Ok(path);
+                return Some(path);
             }
         }
 
-        // If no bundled file found, we'll generate one at runtime
-        let generated = self.generate_dockerfile()?;
-        Ok(generated)
+        None
     }
 
     fn dockerfile_name(&self) -> String {
@@ -304,6 +313,9 @@ pub fn execute_build(
 
     log(&format!("🔨 Forge2K Build Engine v{}", env!("CARGO_PKG_VERSION")), false);
     log(&format!("   Method:    {}", config.method), false);
+    if config.dockerfile.is_none() && config.find_bundled_dockerfile().is_none() {
+        log("ℹ️ No bundled Dockerfile matches this configuration; using a SYNTHESIZED Dockerfile generated at runtime.", false);
+    }
     log(&format!("   Version:   {}", config.version), false);
     log(&format!("   MPI:       {}", config.mpi), false);
     log(&format!("   CPU:       {}", config.cpu), false);
@@ -540,6 +552,30 @@ pub fn execute_native_build(
 
     log(&format!("🔨 Forge2K Native Build v{}", env!("CARGO_PKG_VERSION")), false);
     log(&format!("   Method:    native"), false);
+
+    // ── Step 0: Validate the configuration combination ──
+    // The native path is hardcoded for exactly one supported combination
+    // (x86_64 CPU, system MPICH, psmp variant, no CUDA). Anything else
+    // must fail explicitly instead of silently ignoring the settings.
+    const NATIVE_CPU: &str = "x86_64";
+    const NATIVE_MPI: &str = "mpich";
+    const NATIVE_VARIANT: &str = "psmp";
+    if config.cuda != "none"
+        || config.cpu != NATIVE_CPU
+        || config.mpi != NATIVE_MPI
+        || config.variant != NATIVE_VARIANT
+    {
+        let msg = format!(
+            "Unsupported native build configuration: cpu='{}', mpi='{}', variant='{}', cuda='{}'. \
+             The native method currently only supports: cpu='{}', mpi='{}', variant='{}', cuda='none'. \
+             Use the Spack (Docker) method for other combinations.",
+            config.cpu, config.mpi, config.variant, config.cuda,
+            NATIVE_CPU, NATIVE_MPI, NATIVE_VARIANT
+        );
+        log(&format!("✗ {}", msg), true);
+        return Err(anyhow::anyhow!(msg));
+    }
+    log("✓ Configuration combination supported by native build (x86_64 / system-mpich / psmp / no CUDA)", false);
     log(&format!("   Version:   {}", config.version), false);
     log(&format!("   MPI:       {}", config.mpi), false);
     log(&format!("   CPU:       {}", config.cpu), false);

@@ -114,7 +114,7 @@ RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
     ca-certificates \
     libgomp1 \
     libopenblas-dev \
-    libmpich-dev \
+    libopenmpi-dev \
     libpython3-dev \
     libstdc++-13-dev \
     openssh-client \
