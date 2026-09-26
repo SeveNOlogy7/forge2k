@@ -1,7 +1,7 @@
 use crate::build;
 use anyhow::Result;
 use eframe::egui::{self, Color32, RichText, ScrollArea, Vec2};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 
 // ============================================================
 // Tab enum
@@ -95,14 +95,27 @@ impl Default for Forge2kApp {
 
 impl Forge2kApp {
     fn start_build(&mut self) {
-        if *self.is_building.lock().unwrap() {
+        if *self
+            .is_building
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
             return;
         }
 
         // Clear previous logs
-        self.build_logs.lock().unwrap().clear();
-        *self.build_error.lock().unwrap() = None;
-        *self.cancel_flag.lock().unwrap() = false;
+        self.build_logs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        *self
+            .build_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+        *self
+            .cancel_flag
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = false;
 
         let num_jobs: u32 = self.jobs.parse().unwrap_or(0);
         let num_jobs = if num_jobs == 0 {
@@ -139,13 +152,15 @@ impl Forge2kApp {
         let error = self.build_error.clone();
         let status = self.build_status.clone();
 
-        *is_building.lock().unwrap() = true;
-        *status.lock().unwrap() = None;
+        *is_building.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        *status.lock().unwrap_or_else(PoisonError::into_inner) = None;
 
         // Spawn log collector thread
         std::thread::spawn(move || {
             for line in rx {
-                logs.lock().unwrap().push(line);
+                logs.lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(line);
             }
         });
 
@@ -160,27 +175,34 @@ impl Forge2kApp {
             };
             match result {
                 Ok(build::BuildOutcome::Success) => {
-                    *status.lock().unwrap() = Some(build::BuildOutcome::Success);
+                    *status.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(build::BuildOutcome::Success);
                 }
                 Ok(build::BuildOutcome::Failed) => {
-                    *status.lock().unwrap() = Some(build::BuildOutcome::Failed);
-                    *error.lock().unwrap() =
+                    *status.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(build::BuildOutcome::Failed);
+                    *error.lock().unwrap_or_else(PoisonError::into_inner) =
                         Some("Build failed. Check the build output for details.".into());
                 }
                 Ok(build::BuildOutcome::Cancelled) => {
-                    *status.lock().unwrap() = Some(build::BuildOutcome::Cancelled);
+                    *status.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(build::BuildOutcome::Cancelled);
                 }
                 Err(e) => {
-                    *status.lock().unwrap() = Some(build::BuildOutcome::Failed);
-                    *error.lock().unwrap() = Some(e.to_string());
+                    *status.lock().unwrap_or_else(PoisonError::into_inner) =
+                        Some(build::BuildOutcome::Failed);
+                    *error.lock().unwrap_or_else(PoisonError::into_inner) = Some(e.to_string());
                 }
             }
-            *is_building.lock().unwrap() = false;
+            *is_building.lock().unwrap_or_else(PoisonError::into_inner) = false;
         });
     }
 
     fn cancel_build(&mut self) {
-        *self.cancel_flag.lock().unwrap() = true;
+        *self
+            .cancel_flag
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
     }
 
     fn check_docker(&mut self) {
@@ -242,7 +264,11 @@ impl Forge2kApp {
 impl eframe::App for Forge2kApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Keep repainting during build
-        if *self.is_building.lock().unwrap() {
+        if *self
+            .is_building
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
             ctx.request_repaint();
         }
 
@@ -279,7 +305,11 @@ impl eframe::App for Forge2kApp {
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.add_space(12.0);
-                    if *self.is_building.lock().unwrap() {
+                    if *self
+                        .is_building
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                    {
                         ui.label(
                             RichText::new("● BUILDING")
                                 .size(11.0)
@@ -355,7 +385,10 @@ impl eframe::App for Forge2kApp {
 
 impl Forge2kApp {
     fn render_build_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
-        let is_building_val = *self.is_building.lock().unwrap();
+        let is_building_val = *self
+            .is_building
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
 
         ui.horizontal(|ui| {
             // ─── LEFT: Configuration Panel ───
@@ -624,11 +657,11 @@ impl Forge2kApp {
                     // Will show error in log
                     let logs = self.build_logs.clone();
                     std::thread::spawn(move || {
-                        let mut l = logs.lock().unwrap();
+                        let mut l = logs.lock().unwrap_or_else(PoisonError::into_inner);
                         l.push(build::LogLine {
                             timestamp: "ERROR".into(),
                             text: "Docker is not running. Please start Docker first.".into(),
-                            is_error: true,
+                            level: build::LogLevel::Error,
                         });
                     });
                 }
@@ -636,7 +669,11 @@ impl Forge2kApp {
         }
 
         // Build result status bar (outcome-driven)
-        if let Some(outcome) = &*self.build_status.lock().unwrap() {
+        if let Some(outcome) = &*self
+            .build_status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
             ui.add_space(8.0);
             let (icon, text, color) = match outcome {
                 build::BuildOutcome::Success => (
@@ -659,7 +696,11 @@ impl Forge2kApp {
         }
 
         // Build error display
-        if let Some(err) = &*self.build_error.lock().unwrap() {
+        if let Some(err) = &*self
+            .build_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
             ui.add_space(8.0);
             ui.label(
                 RichText::new(format!("❌ {}", err))
@@ -681,13 +722,20 @@ impl Forge2kApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.checkbox(&mut self.log_auto_scroll, "Auto-scroll");
                 if ui.button("Clear").clicked() {
-                    self.build_logs.lock().unwrap().clear();
+                    self.build_logs
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clear();
                 }
             });
         });
         ui.add_space(4.0);
 
-        let logs = self.build_logs.lock().unwrap().clone();
+        let logs = self
+            .build_logs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         let frame = egui::Frame::dark_canvas(ui.style()).fill(Color32::from_rgb(10, 10, 16));
         frame.show(ui, |ui| {
             ScrollArea::vertical()
@@ -707,8 +755,17 @@ impl Forge2kApp {
                         );
                     } else {
                         for line in &logs {
-                            let color = if line.is_error {
+                            // Level-driven severity: Error → red, Warn →
+                            // yellow. No current producer emits Warn, so the
+                            // rendered split is unchanged from the old
+                            // `is_error` two-state coloring; the legacy
+                            // emoji-prefix heuristics below are kept for
+                            // Info lines to preserve the exact pre-existing
+                            // three-color appearance.
+                            let color = if line.level == build::LogLevel::Error {
                                 Color32::from_rgb(255, 100, 100)
+                            } else if line.level == build::LogLevel::Warn {
+                                Color32::from_rgb(255, 200, 80)
                             } else if line.text.starts_with("✅")
                                 || line.text.starts_with("🚀")
                                 || line.text.starts_with("📋")

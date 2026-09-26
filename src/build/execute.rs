@@ -1,11 +1,11 @@
-use super::{BuildConfig, BuildOutcome, LogLine};
+use super::{BuildConfig, BuildOutcome, LogLevel, LogLine};
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -49,38 +49,47 @@ pub fn execute_build(
 ) -> Result<BuildOutcome> {
     let dockerfile = config.resolve_dockerfile()?;
 
-    let log = |text: &str, is_err: bool| {
+    let log = |text: &str, level: LogLevel| {
         let ts = Local::now().format("%H:%M:%S").to_string();
         let _ = log_tx.send(LogLine {
             timestamp: ts,
             text: text.to_string(),
-            is_error: is_err,
+            level,
         });
     };
 
     log(
         &format!("🔨 Forge2K Build Engine v{}", env!("CARGO_PKG_VERSION")),
-        false,
+        LogLevel::Info,
     );
-    log(&format!("   Method:    {}", config.method), false);
+    log(&format!("   Method:    {}", config.method), LogLevel::Info);
     if config.dockerfile.is_none() && config.find_bundled_dockerfile().is_none() {
-        log("ℹ️ No bundled Dockerfile matches this configuration; using a SYNTHESIZED Dockerfile generated at runtime.", false);
+        log("ℹ️ No bundled Dockerfile matches this configuration; using a SYNTHESIZED Dockerfile generated at runtime.", LogLevel::Info);
     }
-    log(&format!("   Version:   {}", config.version), false);
-    log(&format!("   MPI:       {}", config.mpi), false);
-    log(&format!("   CPU:       {}", config.cpu), false);
-    log(&format!("   CUDA:      {}", config.cuda), false);
-    log(&format!("   Variant:   {}", config.variant), false);
-    log(&format!("   Jobs:      {}", config.jobs), false);
-    log(&format!("   Tag:       {}", config.default_tag()), false);
-    log(&format!("   Dockerfile: {}", dockerfile.display()), false);
-    log("", false);
-    log("🚀 Starting build (this may take 1-3 hours)...", false);
-    log("", false);
+    log(&format!("   Version:   {}", config.version), LogLevel::Info);
+    log(&format!("   MPI:       {}", config.mpi), LogLevel::Info);
+    log(&format!("   CPU:       {}", config.cpu), LogLevel::Info);
+    log(&format!("   CUDA:      {}", config.cuda), LogLevel::Info);
+    log(&format!("   Variant:   {}", config.variant), LogLevel::Info);
+    log(&format!("   Jobs:      {}", config.jobs), LogLevel::Info);
+    log(
+        &format!("   Tag:       {}", config.default_tag()),
+        LogLevel::Info,
+    );
+    log(
+        &format!("   Dockerfile: {}", dockerfile.display()),
+        LogLevel::Info,
+    );
+    log("", LogLevel::Info);
+    log(
+        "🚀 Starting build (this may take 1-3 hours)...",
+        LogLevel::Info,
+    );
+    log("", LogLevel::Info);
 
     let args = config.build_docker_args(&dockerfile);
-    log(&format!("$ docker {}", args.join(" ")), false);
-    log("", false);
+    log(&format!("$ docker {}", args.join(" ")), LogLevel::Info);
+    log("", LogLevel::Info);
 
     let mut child = Command::new("docker")
         .args(&args)
@@ -89,8 +98,16 @@ pub fn execute_build(
         .spawn()
         .map_err(|e| anyhow!("Failed to launch docker build: {}", e))?;
 
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    // Invariant: spawn() above used Stdio::piped() for both pipes on a
+    // fresh child, so take() cannot return None here (unrecoverable).
+    let stdout = child
+        .stdout
+        .take()
+        .expect("child stdout was piped at spawn");
+    let stderr = child
+        .stderr
+        .take()
+        .expect("child stderr was piped at spawn");
 
     // Read stdout in a thread
     let tx_stdout = log_tx.clone();
@@ -98,7 +115,7 @@ pub fn execute_build(
     let stdout_thread = std::thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line in reader.lines() {
-            if *cancel_stdout.lock().unwrap() {
+            if *cancel_stdout.lock().unwrap_or_else(PoisonError::into_inner) {
                 break;
             }
             if let Ok(line) = line {
@@ -106,7 +123,7 @@ pub fn execute_build(
                 let _ = tx_stdout.send(LogLine {
                     timestamp: ts,
                     text: line,
-                    is_error: false,
+                    level: LogLevel::Info,
                 });
             }
         }
@@ -118,7 +135,7 @@ pub fn execute_build(
     let stderr_thread = std::thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines() {
-            if *cancel_stderr.lock().unwrap() {
+            if *cancel_stderr.lock().unwrap_or_else(PoisonError::into_inner) {
                 break;
             }
             if let Ok(line) = line {
@@ -130,7 +147,11 @@ pub fn execute_build(
                 let _ = tx_stderr.send(LogLine {
                     timestamp: ts,
                     text: line,
-                    is_error: is_err,
+                    level: if is_err {
+                        LogLevel::Error
+                    } else {
+                        LogLevel::Info
+                    },
                 });
             }
         }
@@ -138,9 +159,9 @@ pub fn execute_build(
 
     // Wait for completion or cancellation
     loop {
-        if *cancel_flag.lock().unwrap() {
+        if *cancel_flag.lock().unwrap_or_else(PoisonError::into_inner) {
             let _ = child.kill();
-            log("⛔ Build cancelled by user.", true);
+            log("⛔ Build cancelled by user.", LogLevel::Error);
             return Ok(BuildOutcome::Cancelled);
         }
 
@@ -148,24 +169,27 @@ pub fn execute_build(
             Ok(Some(status)) => {
                 drop(stdout_thread);
                 drop(stderr_thread);
-                log("", false);
+                log("", LogLevel::Info);
                 if status.success() {
-                    log("✅ Build completed successfully!", false);
-                    log(&format!("   Image: {}", config.default_tag()), false);
-                    log("", false);
-                    log("💡 Run with:", false);
+                    log("✅ Build completed successfully!", LogLevel::Info);
+                    log(
+                        &format!("   Image: {}", config.default_tag()),
+                        LogLevel::Info,
+                    );
+                    log("", LogLevel::Info);
+                    log("💡 Run with:", LogLevel::Info);
                     log(
                         &format!(
                             "   docker run --rm -v $(pwd):/work {} cp2k --help",
                             config.default_tag()
                         ),
-                        false,
+                        LogLevel::Info,
                     );
                     return Ok(BuildOutcome::Success);
                 } else {
                     log(
                         &format!("❌ Build failed with exit code: {:?}", status.code()),
-                        true,
+                        LogLevel::Error,
                     );
                     return Ok(BuildOutcome::Failed);
                 }
@@ -175,7 +199,10 @@ pub fn execute_build(
                 std::thread::sleep(Duration::from_millis(200));
             }
             Err(e) => {
-                log(&format!("⚠️ Error waiting for build: {}", e), true);
+                log(
+                    &format!("⚠️ Error waiting for build: {}", e),
+                    LogLevel::Error,
+                );
                 return Err(anyhow!("Build process error: {}", e));
             }
         }
@@ -203,17 +230,17 @@ pub(crate) fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
     log_tx: &mpsc::Sender<LogLine>,
     cancel_flag: &Arc<Mutex<bool>>,
 ) -> Result<CmdStatus> {
-    let log = |text: &str, is_err: bool| {
+    let log = |text: &str, level: LogLevel| {
         let ts = Local::now().format("%H:%M:%S").to_string();
         let _ = log_tx.send(LogLine {
             timestamp: ts,
             text: text.to_string(),
-            is_error: is_err,
+            level,
         });
     };
 
     let args_str: Vec<&str> = args.iter().map(|s| s.as_ref()).collect();
-    log(&format!("$ {} {}", cmd, args_str.join(" ")), false);
+    log(&format!("$ {} {}", cmd, args_str.join(" ")), LogLevel::Info);
 
     let mut child = {
         let mut c = Command::new(cmd);
@@ -227,14 +254,22 @@ pub(crate) fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
             .map_err(|e| anyhow!("Failed to run '{}': {}", cmd, e))?
     };
 
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
+    // Invariant: spawn() above used Stdio::piped() for both pipes on a
+    // fresh child, so take() cannot return None here (unrecoverable).
+    let stdout = child
+        .stdout
+        .take()
+        .expect("child stdout was piped at spawn");
+    let stderr = child
+        .stderr
+        .take()
+        .expect("child stderr was piped at spawn");
 
     let tx1 = log_tx.clone();
     let cancel1 = cancel_flag.clone();
     let stdout_thread = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
-            if *cancel1.lock().unwrap() {
+            if *cancel1.lock().unwrap_or_else(PoisonError::into_inner) {
                 break;
             }
             if let Ok(l) = line {
@@ -242,7 +277,7 @@ pub(crate) fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
                 let _ = tx1.send(LogLine {
                     timestamp: ts,
                     text: l,
-                    is_error: false,
+                    level: LogLevel::Info,
                 });
             }
         }
@@ -252,7 +287,7 @@ pub(crate) fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
     let cancel2 = cancel_flag.clone();
     let stderr_thread = std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines() {
-            if *cancel2.lock().unwrap() {
+            if *cancel2.lock().unwrap_or_else(PoisonError::into_inner) {
                 break;
             }
             if let Ok(l) = line {
@@ -262,7 +297,11 @@ pub(crate) fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
                 let _ = tx2.send(LogLine {
                     timestamp: ts,
                     text: l,
-                    is_error: is_err,
+                    level: if is_err {
+                        LogLevel::Error
+                    } else {
+                        LogLevel::Info
+                    },
                 });
             }
         }
@@ -271,13 +310,13 @@ pub(crate) fn run_cmd_logged<S: AsRef<str> + std::fmt::Display>(
     // Poll with try_wait so cancellation can kill the child promptly;
     // log-reader threads keep draining pipes until EOF or cancel.
     loop {
-        if *cancel_flag.lock().unwrap() {
+        if *cancel_flag.lock().unwrap_or_else(PoisonError::into_inner) {
             let _ = child.kill();
             // Detach readers: pipes EOF when the child dies, but a
             // grandchild could hold them open, so never join here.
             drop(stdout_thread);
             drop(stderr_thread);
-            log(&format!("⛔ '{}' cancelled by user.", cmd), true);
+            log(&format!("⛔ '{}' cancelled by user.", cmd), LogLevel::Error);
             return Ok(CmdStatus::Cancelled);
         }
 
@@ -325,20 +364,20 @@ pub fn execute_native_build(
             }
         };
     }
-    let log = |text: &str, is_err: bool| {
+    let log = |text: &str, level: LogLevel| {
         let ts = Local::now().format("%H:%M:%S").to_string();
         let _ = log_tx.send(LogLine {
             timestamp: ts,
             text: text.to_string(),
-            is_error: is_err,
+            level,
         });
     };
 
     log(
         &format!("🔨 Forge2K Native Build v{}", env!("CARGO_PKG_VERSION")),
-        false,
+        LogLevel::Info,
     );
-    log("   Method:    native", false);
+    log("   Method:    native", LogLevel::Info);
 
     // ── Step 0: Validate the configuration combination ──
     // The native path is hardcoded for exactly one supported combination
@@ -359,20 +398,23 @@ pub fn execute_native_build(
             config.cpu, config.mpi, config.variant, config.cuda,
             NATIVE_CPU, NATIVE_MPI, NATIVE_VARIANT
         );
-        log(&format!("✗ {}", msg), true);
+        log(&format!("✗ {}", msg), LogLevel::Error);
         return Err(anyhow::anyhow!(msg));
     }
-    log("✓ Configuration combination supported by native build (x86_64 / system-mpich / psmp / no CUDA)", false);
-    log(&format!("   Version:   {}", config.version), false);
-    log(&format!("   MPI:       {}", config.mpi), false);
-    log(&format!("   CPU:       {}", config.cpu), false);
-    log(&format!("   CUDA:      {}", config.cuda), false);
-    log(&format!("   Variant:   {}", config.variant), false);
-    log(&format!("   Jobs:      {}", config.jobs), false);
-    log("", false);
+    log("✓ Configuration combination supported by native build (x86_64 / system-mpich / psmp / no CUDA)", LogLevel::Info);
+    log(&format!("   Version:   {}", config.version), LogLevel::Info);
+    log(&format!("   MPI:       {}", config.mpi), LogLevel::Info);
+    log(&format!("   CPU:       {}", config.cpu), LogLevel::Info);
+    log(&format!("   CUDA:      {}", config.cuda), LogLevel::Info);
+    log(&format!("   Variant:   {}", config.variant), LogLevel::Info);
+    log(&format!("   Jobs:      {}", config.jobs), LogLevel::Info);
+    log("", LogLevel::Info);
 
     // ── Step 1: Check prerequisites ──
-    log("📋 Step 1/6: Checking system prerequisites...", false);
+    log(
+        "📋 Step 1/6: Checking system prerequisites...",
+        LogLevel::Info,
+    );
     let required = [
         "gcc", "g++", "gfortran", "git", "make", "cmake", "wget", "bunzip2",
     ];
@@ -383,8 +425,14 @@ pub fn execute_native_build(
         }
     }
     if !missing.is_empty() {
-        log(&format!("   Missing: {}", missing.join(", ")), true);
-        log("   Attempting to install missing packages...", false);
+        log(
+            &format!("   Missing: {}", missing.join(", ")),
+            LogLevel::Error,
+        );
+        log(
+            "   Attempting to install missing packages...",
+            LogLevel::Info,
+        );
         run_step!("apt-get", &["update", "-qq"], None, &log_tx, &cancel_flag);
         let mut pkgs: Vec<String> = missing.iter().map(|s| s.to_string()).collect();
         for extra in &[
@@ -417,7 +465,7 @@ pub fn execute_native_build(
             Err(_) => {
                 log(
                     "   ⚠️  Some packages failed to install. Trying with sudo...",
-                    true,
+                    LogLevel::Error,
                 );
                 let missing_str = missing.join(" ");
                 let sudo_args: Vec<String> = vec![
@@ -435,25 +483,41 @@ pub fn execute_native_build(
             }
         }
     } else {
-        log("   ✅ All required tools found", false);
+        log("   ✅ All required tools found", LogLevel::Info);
     }
-    log("", false);
+    log("", LogLevel::Info);
 
     // ── Step 2: Create working directory ──
-    log("📋 Step 2/6: Setting up working directory...", false);
+    log(
+        "📋 Step 2/6: Setting up working directory...",
+        LogLevel::Info,
+    );
     let work_dir = PathBuf::from("/opt/cp2k_build");
     std::fs::create_dir_all(&work_dir).context("Failed to create /opt/cp2k_build")?;
-    log(&format!("   Work dir: {}", work_dir.display()), false);
-    log("", false);
+    log(
+        &format!("   Work dir: {}", work_dir.display()),
+        LogLevel::Info,
+    );
+    log("", LogLevel::Info);
 
     // ── Step 3: Clone CP2K ──
-    log("📋 Step 3/6: Cloning CP2K source...", false);
+    log("📋 Step 3/6: Cloning CP2K source...", LogLevel::Info);
     let cp2k_dir = work_dir.join("cp2k");
     if cp2k_dir.exists() {
-        log("   CP2K directory already exists, pulling latest...", false);
+        log(
+            "   CP2K directory already exists, pulling latest...",
+            LogLevel::Info,
+        );
         run_step!(
             "git",
-            &["-C", cp2k_dir.to_str().unwrap(), "pull"],
+            // Hardcoded ASCII work-dir path: to_str() is always Some here.
+            &[
+                "-C",
+                cp2k_dir
+                    .to_str()
+                    .expect("hardcoded ASCII work-dir is valid UTF-8"),
+                "pull",
+            ],
             None,
             &log_tx,
             &cancel_flag
@@ -467,21 +531,26 @@ pub fn execute_native_build(
             git_args.push(branch);
         }
         git_args.push(clone_url.to_string());
-        git_args.push(cp2k_dir.to_str().unwrap().to_string());
+        git_args.push(
+            cp2k_dir
+                .to_str()
+                .expect("hardcoded ASCII work-dir is valid UTF-8")
+                .to_string(),
+        );
         run_step!("git", &git_args, None, &log_tx, &cancel_flag);
     }
-    log("", false);
+    log("", LogLevel::Info);
 
     // ── Step 4: Install toolchain dependencies ──
     log(
         "📋 Step 4/6: Installing CP2K toolchain dependencies...",
-        false,
+        LogLevel::Info,
     );
     log(
         "   This will download and compile many libraries (30-60 min)...",
-        false,
+        LogLevel::Info,
     );
-    log("", false);
+    log("", LogLevel::Info);
 
     let toolchain_dir = cp2k_dir.join("tools").join("toolchain");
     let toolchain_script = toolchain_dir.join("install_cp2k_toolchain.sh");
@@ -516,11 +585,11 @@ pub fn execute_native_build(
         Ok(CmdStatus::Cancelled) => return Ok(BuildOutcome::Cancelled),
         Err(e) => return Err(anyhow!("Toolchain installation failed: {}", e)),
     }
-    log("", false);
+    log("", LogLevel::Info);
 
     // ── Step 5: Build CP2K ──
-    log("📋 Step 5/6: Building CP2K...", false);
-    log("", false);
+    log("📋 Step 5/6: Building CP2K...", LogLevel::Info);
+    log("", LogLevel::Info);
 
     let use_cmake = config.version == "master";
     if use_cmake {
@@ -557,7 +626,10 @@ echo "BUILD_COMPLETE"
         set_executable(&build_sh)?;
         run_step!(
             "bash",
-            &[build_sh.to_str().unwrap()],
+            // Built below from the hardcoded ASCII work-dir: always UTF-8.
+            &[build_sh
+                .to_str()
+                .expect("ASCII build-script path is valid UTF-8")],
             Some(cp2k_dir.as_path()),
             &log_tx,
             &cancel_flag
@@ -595,16 +667,19 @@ echo "BUILD_COMPLETE"
 
         run_step!(
             "bash",
-            &[build_sh.to_str().unwrap()],
+            // Built below from the hardcoded ASCII work-dir: always UTF-8.
+            &[build_sh
+                .to_str()
+                .expect("ASCII build-script path is valid UTF-8")],
             Some(cp2k_dir.as_path()),
             &log_tx,
             &cancel_flag
         );
     }
-    log("", false);
+    log("", LogLevel::Info);
 
     // ── Step 6: Verify installation ──
-    log("📋 Step 6/6: Verifying installation...", false);
+    log("📋 Step 6/6: Verifying installation...", LogLevel::Info);
     let cp2k_binary = if use_cmake {
         PathBuf::from("/opt/cp2k/install/bin/cp2k.psmp")
     } else {
@@ -617,26 +692,33 @@ echo "BUILD_COMPLETE"
             .unwrap_or(0);
         log(
             &format!("   ✅ CP2K built successfully: {}", cp2k_binary.display()),
-            false,
+            LogLevel::Info,
         );
-        log(&format!("   Binary size: {} MB", size / 1_048_576), false);
-        log("", false);
-        log("   🎉 To use CP2K, add to your PATH:", false);
+        log(
+            &format!("   Binary size: {} MB", size / 1_048_576),
+            LogLevel::Info,
+        );
+        log("", LogLevel::Info);
+        log("   🎉 To use CP2K, add to your PATH:", LogLevel::Info);
         log(
             &format!(
                 "      export PATH={}:$PATH",
-                cp2k_binary.parent().unwrap().display()
+                // Absolute binary path always has a parent directory.
+                cp2k_binary
+                    .parent()
+                    .expect("binary path has a parent directory")
+                    .display()
             ),
-            false,
+            LogLevel::Info,
         );
     } else {
         log(
             "   ⚠️  CP2K binary not found at expected location. Check build output above.",
-            true,
+            LogLevel::Error,
         );
     }
 
-    log("", false);
-    log("✅ Native build completed!", false);
+    log("", LogLevel::Info);
+    log("✅ Native build completed!", LogLevel::Info);
     Ok(BuildOutcome::Success)
 }

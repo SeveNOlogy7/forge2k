@@ -11,7 +11,7 @@ use anyhow::Result;
 use build::{check_docker, print_docker_install_guide, restart_docker, DockerStatus};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 // ============================================================
 // CLI Definition
@@ -309,7 +309,7 @@ fn cmd_build(
                 Ok(l) => {
                     let t = l.trim().to_ascii_lowercase();
                     if t.is_empty() || t == "q" || t == "quit" {
-                        *cancel_stdin.lock().unwrap() = true;
+                        *cancel_stdin.lock().unwrap_or_else(PoisonError::into_inner) = true;
                         break;
                     }
                 }
@@ -326,14 +326,16 @@ fn cmd_build(
         }
     });
 
-    // Print log lines as they arrive
+    // Print log lines as they arrive. CLI appearance is unchanged from the
+    // old `is_error` flag: Error keeps the red timestamp/text, everything
+    // else keeps the dimmed timestamp and plain text.
     for line in rx {
-        let prefix = if line.is_error {
+        let prefix = if line.level == build::LogLevel::Error {
             format!("[{}]", line.timestamp).red().to_string()
         } else {
             format!("[{}]", line.timestamp).dimmed().to_string()
         };
-        if line.is_error {
+        if line.level == build::LogLevel::Error {
             println!("{} {}", prefix, line.text.red());
         } else {
             println!("{} {}", prefix, line.text);

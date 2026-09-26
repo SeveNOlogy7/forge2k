@@ -24,7 +24,7 @@ use std::process::{Command, Stdio};
 #[cfg(test)]
 use std::sync::mpsc;
 #[cfg(test)]
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 #[cfg(test)]
 use std::time::Duration;
 
@@ -148,11 +148,22 @@ impl BuildConfig {
     }
 }
 
+/// Severity of a log line. Replaces the former `is_error: bool`
+/// (old `true` → [`LogLevel::Error`], old `false` → [`LogLevel::Info`]);
+/// [`LogLevel::Warn`] is reserved for future producers — no existing
+/// call site emits it, so the rendered severity split is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
 #[derive(Debug, Clone)]
 pub struct LogLine {
     pub timestamp: String,
     pub text: String,
-    pub is_error: bool,
+    pub level: LogLevel,
 }
 
 #[derive(Debug, Clone)]
@@ -685,7 +696,7 @@ mod tests {
 
     #[test]
     fn t14_execute_build_docker_unreachable_returns_err_not_success() {
-        let _serial = PROCESS_TESTS.lock().unwrap();
+        let _serial = PROCESS_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
         let tmp = TempGuard::new("t14_nodocker");
         let df = tmp.0.join("df.Dockerfile");
         std::fs::write(&df, "FROM scratch\n").expect("write dockerfile");
@@ -717,7 +728,7 @@ mod tests {
 
     #[test]
     fn t14_execute_build_cancel_flag_pre_set_returns_cancelled_and_kills_child() {
-        let _serial = PROCESS_TESTS.lock().unwrap();
+        let _serial = PROCESS_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
         let tmp = TempGuard::new("t14_cancel_build");
         let df = tmp.0.join("df.Dockerfile");
         std::fs::write(&df, "FROM scratch\n").expect("write dockerfile");
@@ -735,7 +746,7 @@ mod tests {
         std::thread::spawn(move || {
             let mut short = spawn_short_sleep_subprocess();
             let _ = short.wait();
-            *flag2.lock().unwrap() = true;
+            *flag2.lock().unwrap_or_else(PoisonError::into_inner) = true;
         });
 
         // The fake `docker` (a shell copy) is spawned, then the poll loop
@@ -754,7 +765,7 @@ mod tests {
 
     #[test]
     fn t14_run_cmd_logged_cancel_kills_child_before_sentinel_is_written() {
-        let _serial = PROCESS_TESTS.lock().unwrap();
+        let _serial = PROCESS_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
         let tmp = TempGuard::new("t14_cancel_cmd");
         let sentinel = tmp.0.join("sentinel.txt");
         let _ = std::fs::remove_file(&sentinel);
@@ -769,7 +780,7 @@ mod tests {
         std::thread::spawn(move || {
             let mut short = spawn_short_sleep_subprocess();
             let _ = short.wait();
-            *flag2.lock().unwrap() = true;
+            *flag2.lock().unwrap_or_else(PoisonError::into_inner) = true;
         });
 
         let status = run_cmd_logged(cmd, &args, None, &tx, &flag)
@@ -797,7 +808,7 @@ mod tests {
 
     #[test]
     fn t14_run_cmd_logged_completion_returns_completed() {
-        let _serial = PROCESS_TESTS.lock().unwrap();
+        let _serial = PROCESS_TESTS.lock().unwrap_or_else(PoisonError::into_inner);
         let (tx, rx) = mpsc::channel::<LogLine>();
         let flag = Arc::new(Mutex::new(false));
         #[cfg(target_os = "windows")]
