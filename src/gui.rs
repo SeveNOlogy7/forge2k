@@ -45,6 +45,10 @@ pub struct Forge2kApp {
     registry_status: String,
     current_mirror: String,
 
+    // Version list cache: one disk scan at startup or via the explicit
+    // Refresh button — the frame loop never rescans dockerfiles/.
+    configs_cache: Vec<build::ConfigInfo>,
+
     // Settings
     mirror_input: String,
     settings_message: String,
@@ -57,6 +61,9 @@ pub struct Forge2kApp {
 impl Default for Forge2kApp {
     fn default() -> Self {
         let current_mirror = build::get_registry_mirror().unwrap_or_default();
+        // Settings persist across restarts at <home>/.forge2k/settings.json;
+        // a missing/corrupt file silently degrades to the defaults below.
+        let settings = crate::settings::ForgeSettings::load();
         Self {
             method: "spack".into(),
             version: "2026.1".into(),
@@ -77,7 +84,8 @@ impl Default for Forge2kApp {
             docker_checked: false,
             registry_status: "Not checked".into(),
             current_mirror,
-            mirror_input: String::new(),
+            configs_cache: build::list_available_configs(),
+            mirror_input: settings.mirror_input,
             settings_message: String::new(),
             active_tab: Tab::Build,
             log_auto_scroll: true,
@@ -211,6 +219,22 @@ impl Forge2kApp {
             build::NetworkStatus::Unknown(reason) => {
                 self.registry_status = format!("❓ {}", reason);
             }
+        }
+    }
+
+    /// Persist the current settings to `<home>/.forge2k/settings.json`.
+    ///
+    /// Called only from user-commit points in the Settings tab (edit
+    /// committed via `changed()`, Apply, auto-detect, known-mirror "Use")
+    /// — never from the frame loop — so the file is written on real
+    /// changes only. Failures degrade to a red settings message instead
+    /// of panicking.
+    fn persist_settings(&mut self) {
+        let settings = crate::settings::ForgeSettings {
+            mirror_input: self.mirror_input.clone(),
+        };
+        if let Err(e) = settings.save() {
+            self.settings_message = format!("❌ Failed to save settings: {:#}", e);
         }
     }
 }
@@ -387,20 +411,21 @@ impl Forge2kApp {
             });
         ui.add_space(6.0);
 
-        // Version (same source as the CLI: build::list_available_configs;
-        // native builds are host-local and keep their own list)
+        // Version (same source as the CLI: build::list_available_configs,
+        // cached in configs_cache and re-scanned only via the Refresh
+        // button; native builds are host-local and keep their own list)
         ui.label(
             RichText::new("CP2K Version")
                 .size(12.0)
                 .color(Color32::from_rgb(150, 150, 170)),
         );
-        let docker_configs = if self.method == "native" {
+        let docker_configs: Vec<&build::ConfigInfo> = if self.method == "native" {
             Vec::new()
         } else {
-            build::list_available_configs()
-                .into_iter()
+            self.configs_cache
+                .iter()
                 .filter(|c| c.method == self.method)
-                .collect::<Vec<_>>()
+                .collect()
         };
         let versions: Vec<String> = if self.method == "native" {
             vec!["master", "2026.1", "2025.2", "2024.3"]
@@ -417,13 +442,20 @@ impl Forge2kApp {
             && docker_configs.iter().any(|c| {
                 c.version == self.version && c.source == build::DockerfileSource::Synthesized
             });
-        egui::ComboBox::from_id_salt("version")
-            .selected_text(&self.version)
-            .show_ui(ui, |ui| {
-                for v in &versions {
-                    ui.selectable_value(&mut self.version, v.clone(), v);
-                }
-            });
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("version")
+                .selected_text(&self.version)
+                .show_ui(ui, |ui| {
+                    for v in &versions {
+                        ui.selectable_value(&mut self.version, v.clone(), v);
+                    }
+                });
+            // Manual re-scan: the only place the frame loop touches the
+            // dockerfiles/ directory again.
+            if ui.button("⟳ Refresh").clicked() {
+                self.configs_cache = build::list_available_configs();
+            }
+        });
         if selected_is_synthesized {
             ui.label(
                 RichText::new("synthesized: no bundled Dockerfile, generated at build time")
@@ -477,23 +509,39 @@ impl Forge2kApp {
             });
         ui.add_space(6.0);
 
-        // CUDA
+        // CUDA (options come from the build-side support matrix so the GUI
+        // can never offer a combination the executor would reject; an empty
+        // set — e.g. native — renders the control disabled)
         ui.label(
             RichText::new("CUDA Support")
                 .size(12.0)
                 .color(Color32::from_rgb(150, 150, 170)),
         );
-        let cudas: Vec<&str> = match self.method.as_str() {
-            "spack" => vec!["none"],
-            _ => vec!["none", "P100", "V100"],
-        };
-        egui::ComboBox::from_id_salt("cuda")
-            .selected_text(&self.cuda)
-            .show_ui(ui, |ui| {
-                for c in &cudas {
-                    ui.selectable_value(&mut self.cuda, c.to_string(), *c);
-                }
-            });
+        let cuda_options = build::cuda_options_for_method(&self.method);
+        if !cuda_options.iter().any(|c| *c == self.cuda) {
+            // Method changed to one that no longer supports the current
+            // selection: fall back to the always-valid 'none'.
+            self.cuda = "none".into();
+        }
+        ui.scope(|ui| {
+            if cuda_options.is_empty() {
+                ui.disable();
+            }
+            egui::ComboBox::from_id_salt("cuda")
+                .selected_text(&self.cuda)
+                .show_ui(ui, |ui| {
+                    for c in &cuda_options {
+                        ui.selectable_value(&mut self.cuda, c.to_string(), *c);
+                    }
+                });
+        });
+        if cuda_options.is_empty() {
+            ui.label(
+                RichText::new("CUDA is not supported by the native method (host build)")
+                    .size(10.0)
+                    .color(Color32::from_rgb(150, 150, 170)),
+            );
+        }
         ui.add_space(6.0);
 
         // Variant
@@ -845,11 +893,17 @@ impl Forge2kApp {
             settings_card.show(ui, |ui| {
                 ui.label("Mirror URL:");
                 ui.horizontal(|ui| {
-                    ui.add(
+                    let mirror_edit = ui.add(
                         egui::TextEdit::singleline(&mut self.mirror_input)
                             .desired_width(400.0)
                             .hint_text("https://docker.mirrors.ustc.edu.cn"),
                     );
+                    // Persist the draft only when the user commits an edit
+                    // (content changed AND the field lost focus / Enter) —
+                    // never per frame, never per keystroke.
+                    if mirror_edit.changed() && mirror_edit.lost_focus() {
+                        self.persist_settings();
+                    }
                     if ui.button("Apply").clicked() {
                         if self.mirror_input.starts_with("http://")
                             || self.mirror_input.starts_with("https://")
@@ -868,6 +922,10 @@ impl Forge2kApp {
                             self.settings_message =
                                 "❌ Invalid URL. Must start with http:// or https://".into();
                         }
+                        // The typed draft is user intent: keep it across
+                        // restarts regardless of whether the mirror itself
+                        // was accepted by the Docker daemon.
+                        self.persist_settings();
                     }
                 });
 
@@ -877,6 +935,7 @@ impl Forge2kApp {
                         if let Some(url) = build::detect_best_mirror() {
                             self.mirror_input = url.clone();
                             self.settings_message = format!("✅ Found working mirror: {}", url);
+                            self.persist_settings();
                         } else {
                             self.settings_message =
                                 "❌ No working mirror found. Try a manual URL.".into();
@@ -899,7 +958,17 @@ impl Forge2kApp {
 
                 if !self.settings_message.is_empty() {
                     ui.add_space(8.0);
-                    ui.label(RichText::new(&self.settings_message).size(12.0));
+                    // Save failures (and all other errors) render in red.
+                    let message_color = if self.settings_message.starts_with('❌') {
+                        Color32::from_rgb(255, 100, 100)
+                    } else {
+                        Color32::from_rgb(220, 220, 220)
+                    };
+                    ui.label(
+                        RichText::new(&self.settings_message)
+                            .size(12.0)
+                            .color(message_color),
+                    );
                 }
             });
 
@@ -941,6 +1010,7 @@ impl Forge2kApp {
                         );
                         if ui.button("Use").clicked() {
                             self.mirror_input = url.to_string();
+                            self.persist_settings();
                         }
                     });
                 }

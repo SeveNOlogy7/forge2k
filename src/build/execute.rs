@@ -19,6 +19,24 @@ fn set_executable(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// CUDA options the GUI offers for a build method — the single source of
+/// truth for the method→CUDA support matrix, kept next to (and consistent
+/// with) the Step 0 validation inside [`execute_native_build`] and with
+/// the bundled dockerfiles/ layout:
+///
+/// - `"spack"`: bundled spack images are CPU-only → `none`
+/// - `"toolchain"`: bundled CUDA variants exist for P100 and V100
+/// - `"native"` (and anything unknown): the host build only accepts
+///   cuda='none' (Step 0 rejects everything else) → empty set, which the
+///   GUI renders as a disabled control
+pub fn cuda_options_for_method(method: &str) -> Vec<&'static str> {
+    match method {
+        "spack" => vec!["none"],
+        "toolchain" => vec!["none", "P100", "V100"],
+        _ => Vec::new(),
+    }
+}
+
 // ============================================================
 // Docker Build Execution
 // ============================================================

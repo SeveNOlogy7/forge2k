@@ -5,6 +5,7 @@
 mod build;
 mod gui;
 mod mirrors;
+mod settings;
 
 use anyhow::Result;
 use build::{check_docker, print_docker_install_guide, restart_docker, DockerStatus};

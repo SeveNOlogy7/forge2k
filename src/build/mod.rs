@@ -6,7 +6,7 @@ mod registry;
 
 pub use catalog::{list_available_configs, DockerfileSource};
 pub use docker::{check_docker, print_docker_install_guide, restart_docker, DockerStatus};
-pub use execute::{execute_build, execute_native_build};
+pub use execute::{cuda_options_for_method, execute_build, execute_native_build};
 pub use registry::{
     check_registry, daemon_config_path, detect_best_mirror, get_registry_mirror,
     remove_registry_mirror, set_registry_mirror, NetworkStatus,
@@ -772,7 +772,7 @@ mod tests {
             *flag2.lock().unwrap() = true;
         });
 
-        let status = run_cmd_logged(&cmd, &args, None, &tx, &flag)
+        let status = run_cmd_logged(cmd, &args, None, &tx, &flag)
             .expect("run_cmd_logged must not error on cancel");
         drain_rx(rx);
 
@@ -806,7 +806,7 @@ mod tests {
         #[cfg(not(target_os = "windows"))]
         let (cmd, args): (&str, Vec<String>) = ("echo", vec!["hi".to_string()]);
         let status =
-            run_cmd_logged(&cmd, &args, None, &tx, &flag).expect("trivial command must not error");
+            run_cmd_logged(cmd, &args, None, &tx, &flag).expect("trivial command must not error");
         drain_rx(rx);
         assert_eq!(
             status,
