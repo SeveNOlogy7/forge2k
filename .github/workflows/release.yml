@@ -1,0 +1,131 @@
+name: Release
+
+# Tag pushes do NOT trigger ci.yml, so this workflow is self-contained:
+# its `gate` job re-runs the full quality gate before any artifact is built.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  gate:
+    name: quality gate (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --all-targets
+
+  build:
+    name: build & package (${{ matrix.os }})
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      # Linux binaries are console-subsystem: stdout is capturable, so assert
+      # real stdout content. Assertions here must be able to fail the job.
+      - name: Smoke test (linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          version_output="$(./target/release/forge2k --version)"
+          echo "$version_output"
+          grep -q '^forge2k 1\.0\.0$' <<< "$version_output" \
+            || { echo "::error::unexpected --version output: $version_output"; exit 1; }
+          list_output="$(./target/release/forge2k list)"
+          echo "$list_output"
+          [ -n "$list_output" ] \
+            || { echo "::error::'forge2k list' printed nothing"; exit 1; }
+
+      # Windows release binaries are GUI-subsystem (windows_subsystem = "windows")
+      # and produce NO stdout, so assert the exit code of the CLI subcommand
+      # instead. NEVER run a bare `forge2k` here: without a subcommand it opens
+      # the GUI window and hangs the runner.
+      - name: Smoke test (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & ./target/release/forge2k.exe list
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::'forge2k list' exited with $LASTEXITCODE"
+            exit 1
+          }
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1).Matches[0].Groups[1].Value
+          $os = "${{ runner.os }}".ToLower()
+          $zip = "forge2k-v$version-$os.zip"
+          $bin = if ("${{ runner.os }}" -eq "Windows") {
+            "target/release/forge2k.exe"
+          } else {
+            "target/release/forge2k"
+          }
+          Compress-Archive -Path $bin, "README.md" -DestinationPath $zip -Force
+          # Inspect entries with the .NET zip API (pwsh, both OS legs). GNU tar
+          # (ubuntu default) cannot read zip archives ("This does not look like
+          # a tar archive"), so tar-based checks would fail the linux leg.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $entries = @([IO.Compression.ZipFile]::OpenRead($zip).Entries)
+          Write-Host "zip entries: $(($entries | ForEach-Object FullName) -join ', ')"
+          if ($entries.Count -ne 2) {
+            throw "expected exactly 2 entries (binary + README.md) in $zip, got $($entries.Count)"
+          }
+          "ZIP_NAME=$zip" >> $env:GITHUB_ENV
+
+      - name: Upload zip artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+
+  # Draft release (OD-4): artifacts are attached as a DRAFT; the owner
+  # publishes manually after inspecting the zips.
+  release:
+    name: draft GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download zips
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create draft GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
