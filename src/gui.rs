@@ -1094,23 +1094,41 @@ impl Forge2kApp {
             ui.label(RichText::new("One-click CP2K Docker Image Builder").size(16.0));
             ui.add_space(16.0);
 
-            ui.label("A beautiful cross-platform GUI + CLI tool for building CP2K Docker images");
-            ui.label("with support for both Spack-based and Toolchain-based builds.");
+            ui.label("A beautiful cross-platform GUI + CLI tool for building CP2K Docker images,");
+            ui.label("with Spack (v2025.2+), Toolchain (v2023.2+), master and native builds.");
             ui.add_space(16.0);
 
             let features = [
                 "🔥 One-click build with full configuration options",
-                "📦 Multiple build methods: Spack (2025.2) & Toolchain (2023.2)",
+                "📦 Build methods: Spack, Toolchain, native & master branch",
                 "🖥 Beautiful GUI & powerful CLI interfaces",
-                "🌐 Auto-detects and configures Docker registry mirrors",
+                "⚙ Settings persistence (~/.forge2k/settings.json)",
+                "⏹ Cancellable builds from both GUI and CLI",
+                "🌐 Docker registry mirror management (GUI Settings & CLI mirror)",
                 "🐳 Docker Engine detection with installation guide",
                 "🎯 CPU target optimization (x86_64, Cascadelake, etc.)",
-                "🎮 CUDA GPU support (P100, V100)",
+                "🎮 CUDA GPU options (P100, V100), filtered by build method",
                 "🔄 Real-time build log streaming",
-                "🪟 Cross-platform: Windows, Linux, WSL2",
+                "🪟 Cross-platform: Windows, Linux, macOS",
+                "✅ Unit & behavior tests gated by CI (fmt, clippy, check, test)",
             ];
             for f in &features {
                 ui.label(RichText::new(*f).size(13.0));
+            }
+
+            ui.add_space(16.0);
+            ui.label(RichText::new("⚠ Known limitations").size(14.0).strong());
+            let limitations = [
+                "• Toolchain CUDA (P100/V100) variants: full image-level e2e deferred",
+                "• 2026.1 & master: no bundled Dockerfile, synthesized per build (e2e deferred)",
+                "• Release-mode CLI build: docker stdout not forwarded (kept as-is, pending OD-1)",
+            ];
+            for l in &limitations {
+                ui.label(
+                    RichText::new(*l)
+                        .size(13.0)
+                        .color(Color32::from_rgb(160, 140, 100)),
+                );
             }
 
             ui.add_space(16.0);

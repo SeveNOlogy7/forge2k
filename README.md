@@ -54,7 +54,7 @@ forge2k list
      --force              跳过 Docker 引擎检查
 ```
 
-构建过程中按 `q` 或回车可取消（取消会终止 docker 进程并返回非零退出码）。构建失败时 CLI 以非零退出码结束，只有成功才打印完成提示。
+构建过程中按 `q` 或回车可取消（GUI 的 CANCEL 按钮等价）。取消会终止 docker 进程并返回非零退出码；构建失败同样以非零退出码结束，只有成功才打印完成提示。
 
 ### 镜像 tag 命名
 
@@ -64,16 +64,16 @@ forge2k list
 
 `forge2k gui` 或直接运行，四个标签页：
 
-- **Build**——选择方法/版本/MPI/CPU/CUDA/变体，启动、取消构建，实时滚动日志；构建结果以状态条显示（绿=成功 / 红=失败 / 黄=已取消）
+- **Build**——选择方法/版本/MPI/CPU/CUDA/变体，启动、取消构建，实时滚动日志；构建结果以状态条显示（绿=成功 / 红=失败 / 黄=已取消）；CUDA 选项按所选方法联动过滤（spack 仅 none，toolchain 可选 P100/V100）
 - **System**——Docker 引擎与系统信息
-- **Settings**——registry 镜像源管理（与 `mirror` 子命令同源）
-- **About**——项目信息
+- **Settings**——registry 镜像源管理（与 `mirror` 子命令同源）；**设置会持久化**到 `~/.forge2k/settings.json`，重启后保留
+- **About**——项目信息与已知限制
 
 ## 构建方法
 
 - **spack**（默认）：基于 `ubuntu:24.04`，两段式构建——Spack 环境解析 CP2K 依赖后安装，运行时镜像只保留安装产物。支持 v2025.2+ 与 master。
 - **toolchain**：基于 `ubuntu:22.04`（CUDA 变体基于 `nvidia/cuda:12.2.0-devel`），运行 CP2K 官方 `install_cp2k_toolchain.sh` 后 `make`。支持 v2023.2 与 CUDA（P100/V100）。
-- **native**：不经 Docker，直接在主机上克隆 CP2K 源码、跑 toolchain 安装、CMake/make 构建。当前仅支持默认组合（x86_64 / system mpich / psmp），其他组合会显式报错。
+- **native**：不经 Docker，直接在主机上克隆 CP2K 源码、跑 toolchain 安装、CMake/make 构建。当前仅支持默认组合（x86_64 / system mpich / psmp / cuda none），其他组合会显式报错。
 
 ## Dockerfile 捆绑清单
 
@@ -86,14 +86,37 @@ forge2k list
 | `dockerfiles/toolchain/2023.2_mpich_generic_cuda_P100_psmp.Dockerfile` | Toolchain + CUDA P100 |
 | `dockerfiles/toolchain/2023.2_mpich_generic_cuda_V100_psmp.Dockerfile` | Toolchain + CUDA V100 |
 
-**默认版本 2026.1（与 master）没有捆绑 Dockerfile**：构建时 Forge2K 会按 `src/templates/` 模板现场合成（日志中会显式提示 synthesized），功能等价但未经镜像级端到端验证。
+**默认版本 2026.1（与 master）没有捆绑 Dockerfile**：构建时 Forge2K 会按 `src/templates/` 模板现场合成（日志中会显式提示 synthesized），功能等价但未经镜像级端到端验证。捆绑的 2025.2 spack 镜像与 2023.2 toolchain 镜像已做过全量构建与运行冒烟验证。
+
+## 发布
+
+推送 `v*` tag（如 `v1.0.1`）会触发 `.github/workflows/release.yml`：先跑 fmt/clippy/test 门禁，再双平台 release 构建、产物冒烟，最后把 zip（二进制 + README）上传为 **GitHub Release 草稿**，由维护者手动 publish。
+
+## 项目结构
+
+```
+src/
+├── main.rs          # clap CLI（build/list/gui/check/mirror）+ stdin 取消
+├── gui.rs           # egui 四标签界面
+├── settings.rs      # 设置持久化（serde + ~/.forge2k/settings.json）
+├── mirrors.rs       # registry 镜像源单一来源
+├── templates/       # 合成 Dockerfile 模板（include_str!）
+└── build/
+    ├── mod.rs       # 共享类型（BuildConfig/BuildOutcome/LogLine）+ re-export
+    ├── execute.rs   # docker/native 构建执行与取消
+    ├── registry.rs  # registry 检测与镜像源配置
+    ├── catalog.rs   # 捆绑 Dockerfile 目录扫描与配置列表
+    ├── generate.rs  # 合成 Dockerfile 生成
+    ├── docker.rs    # Docker 引擎探测与重启
+    └── tests.rs     # 测试套件
+```
 
 ## 开发与测试
 
 ```bash
 cargo check                  # 编译检查
-cargo test                   # 单元 + 行为测试（16 个，不依赖 Docker daemon）
-cargo clippy -- -D warnings  # lint 门禁
+cargo test                   # 单元 + 行为测试（28 个，不依赖 Docker daemon）
+cargo clippy --all-targets -- -D warnings  # lint 门禁（CI 同款口径）
 cargo fmt --check            # 格式门禁
 ```
 
@@ -101,6 +124,8 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 时于 ubuntu / windows 双平
 
 ## 已知限制
 
-- CLI 与 GUI 默认版本已统一为 **2026.1**（2026.1 走 synthesized 合成路径，见上）
+- Windows release 构建是 GUI 子系统，CLI 无 stdout（退出码正常）；debug 构建不受影响
 - native 构建仅支持默认参数组合，GUI 中选择不支持组合会显式报错
+- CUDA P100/V100 toolchain 变体与其他变体共享修复，但未单独做过全量镜像构建
+- 2026.1 / master 走 synthesized 合成路径（见上）
 - `mirror --restart` 在 Windows 上经 `cmd /C start` 重启 Docker Desktop，未做破坏性端到端验证
