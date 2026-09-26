@@ -149,4 +149,27 @@ mod tests {
             .expect("save must create parent dirs");
         assert!(path.is_file(), "settings file must exist after save");
     }
+
+    #[test]
+    fn saved_json_uses_stable_field_names() {
+        // Forward-compat guard: the on-disk key is part of the public
+        // format. A silent field rename would orphan every existing user's
+        // settings.json (serde would fall back to the `#[serde(default)]`
+        // empty string), so the key name itself is pinned here.
+        let dir = scratch("field_names");
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("settings.json");
+        ForgeSettings {
+            mirror_input: "https://mirror.example.com".into(),
+        }
+        .save_to_path(&path)
+        .expect("save must succeed");
+        let raw = std::fs::read_to_string(&path).expect("read saved settings");
+        let value: serde_json::Value = serde_json::from_str(&raw).expect("saved file must be JSON");
+        assert_eq!(
+            value.get("mirror_input").and_then(|v| v.as_str()),
+            Some("https://mirror.example.com"),
+            "on-disk key 'mirror_input' must not be renamed (would orphan existing settings)"
+        );
+    }
 }
