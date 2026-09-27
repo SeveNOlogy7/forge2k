@@ -92,8 +92,10 @@ RUN --mount=type=cache,target=/opt/spack-1.2.2/var/spack/cache,id=spack-src,shar
 RUN cp -ar ${SPACK_ENV_VIEW}/bin ${SPACK_ENV_VIEW}/include ${SPACK_ENV_VIEW}/lib /opt/spack
 
 # Run CMake
+# NOTE: the Spack env view keeps py-torch files as symlinks, so the find in
+# cmake_cp2k.sh must follow symlinks to locate TorchConfig.cmake.
 WORKDIR /opt/cp2k
-RUN /bin/bash -c -o pipefail "source ./cmake/cmake_cp2k.sh spack_all ${CP2K_VERSION}"
+RUN /bin/bash -c -o pipefail "find /opt/spack -name TorchConfig.cmake > /tmp/torch_probe.txt 2>/dev/null || true; echo ===TORCH PROBE===; cat /tmp/torch_probe.txt; sed -i 's|find /opt/spack/lib -name TorchConfig.cmake|find -L /opt/spack/lib -name TorchConfig.cmake|' ./cmake/cmake_cp2k.sh; source ./cmake/cmake_cp2k.sh spack_all ${CP2K_VERSION}"
 
 # Compile CP2K for target CPU cascadelake
 ARG LOG_LINES
