@@ -456,6 +456,283 @@ fn t13_toolchain_dockerfile_synthesized_key_fields() {
     );
 }
 
+// --------------------------------------------------------
+// Phase 3 Wave 4 (T-C13/T-C14): cache-mount key-field
+// assertions for the bundled and synthesized dockerfiles
+// --------------------------------------------------------
+//
+// Pure-text assertions over the six bundled dockerfiles and the
+// generated content — no Docker daemon needed, CI-safe. Each
+// assertion pins a structural mount element: target/id/sharing as
+// ONE mount spec, the canon-git id/REF/seed-copy as ONE physical
+// line (same style as the synthesized tests above). The stage-2
+// apt mount is asserted for every bundled file: wave 2 retrofitted
+// the toolchain install-stage apt too, so the real contract is two
+// mounts per file (plan F2 states the >=1 minimum; we pin reality).
+
+/// Reads a bundled dockerfile relative to the crate root
+/// (CARGO_MANIFEST_DIR), panicking with the path on failure.
+fn bundled_dockerfile(rel: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "T-C13: bundled dockerfile must be readable at {}: {}",
+            path.display(),
+            e
+        )
+    })
+}
+
+/// Splits dockerfile content at the second top-level `FROM` line
+/// into (stage1, stage2); panics if a second stage is missing.
+fn split_stages(content: &str) -> (&str, &str) {
+    let mut froms = content.match_indices("\nFROM ");
+    froms
+        .next()
+        .expect("T-C13: dockerfile must contain a first FROM stage");
+    let second = froms
+        .next()
+        .expect("T-C13: dockerfile must contain a second FROM stage");
+    let at = second.0 + 1; // keep the newline on the stage-1 side
+    (&content[..at], &content[at..])
+}
+
+/// The one physical line carrying `needle`, for same-line structural
+/// combos (canon-git id/target/REF/seed-copy all live on one line).
+fn line_containing<'a>(content: &'a str, needle: &str, what: &str) -> &'a str {
+    content
+        .lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| {
+            panic!(
+                "T-C13/T-C14: expected a dockerfile line containing {:?} ({})",
+                needle, what
+            )
+        })
+}
+
+/// The canon-git structural parts that must sit on the ONE RUN line
+/// carrying the version-keyed cache id (shared bundled/synthesized).
+fn assert_canon_git_line(git_line: &str, expected_ref: &str) {
+    for part in [
+        "target=/opt/.cache/cp2k-src",
+        "sharing=locked",
+        expected_ref,
+        "git clone --recursive -b \"$REF\" https://github.com/cp2k/cp2k.git",
+        "cp -a \"$C/HEAD/.\" /opt/cp2k/",
+    ] {
+        assert!(
+            git_line.contains(part),
+            "canon-git line must contain {:?} (id/REF/seed-copy combo), got: {}",
+            part,
+            git_line
+        );
+    }
+}
+
+#[test]
+fn t_c13_bundled_spack_dockerfiles_cache_mount_fields() {
+    const SPACK_FILES: [&str; 3] = [
+        "dockerfiles/spack/2025.2_mpich_cascadelake_psmp.Dockerfile",
+        "dockerfiles/spack/2025.2_mpich_x86_64_psmp.Dockerfile",
+        "dockerfiles/spack/2025.2_openmpi_cascadelake_psmp.Dockerfile",
+    ];
+    for rel in SPACK_FILES {
+        let content = bundled_dockerfile(rel);
+        let (stage1, stage2) = split_stages(&content);
+
+        // Stage 1 and stage 2 apt share the one apt-2404 cache pool
+        // (one id per base distro, plan default 4).
+        let apt_spec = "--mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked";
+        assert!(
+            stage1.contains(apt_spec) && stage2.contains(apt_spec),
+            "T-C13: {} apt RUNs must mount the apt-2404 cache in BOTH stages (stage1 hit: {}, stage2 hit: {})",
+            rel,
+            stage1.contains(apt_spec),
+            stage2.contains(apt_spec)
+        );
+
+        // canon-git keyed cp2k-src-2025.2, REF pinned to support/v2025.2.
+        let git_line = line_containing(
+            &content,
+            "id=cp2k-src-2025.2",
+            &format!("{} canon-git block keyed cp2k-src-2025.2", rel),
+        );
+        assert_canon_git_line(git_line, "REF=support/v2025.2");
+
+        // Bundled spack files pin the literal default source-cache path
+        // of SPACK_VERSION=1.2.2 (plan default 7, bundled variant).
+        let spack_src_spec =
+            "--mount=type=cache,target=/opt/spack-1.2.2/var/spack/cache,id=spack-src,sharing=locked";
+        assert!(
+            content.contains(spack_src_spec),
+            "T-C13: {} spack install RUN must mount id=spack-src on the literal default cache path (target/id/sharing combo)",
+            rel
+        );
+    }
+}
+
+#[test]
+fn t_c13_bundled_toolchain_dockerfiles_cache_mount_fields() {
+    const TOOLCHAIN_FILES: [&str; 3] = [
+        "dockerfiles/toolchain/2023.2_mpich_generic_psmp.Dockerfile",
+        "dockerfiles/toolchain/2023.2_mpich_generic_cuda_P100_psmp.Dockerfile",
+        "dockerfiles/toolchain/2023.2_mpich_generic_cuda_V100_psmp.Dockerfile",
+    ];
+    for rel in TOOLCHAIN_FILES {
+        let content = bundled_dockerfile(rel);
+        let (stage1, stage2) = split_stages(&content);
+
+        // 22.04 base (plain + both CUDA variants) => one apt id.
+        let apt_spec = "--mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked";
+        assert!(
+            stage1.contains(apt_spec) && stage2.contains(apt_spec),
+            "T-C13: {} apt RUNs must mount the apt-2204 cache in BOTH stages (stage1 hit: {}, stage2 hit: {})",
+            rel,
+            stage1.contains(apt_spec),
+            stage2.contains(apt_spec)
+        );
+
+        // All three variants share the cp2k-src-2023.2 seed cache.
+        let git_line = line_containing(
+            &content,
+            "id=cp2k-src-2023.2",
+            &format!("{} canon-git block keyed cp2k-src-2023.2", rel),
+        );
+        assert_canon_git_line(git_line, "REF=support/v2023.2");
+
+        // Tarball downloads share one global cache across the variants
+        // (plan default 4).
+        let tarball_spec =
+            "--mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarballs,sharing=locked";
+        assert!(
+            content.contains(tarball_spec),
+            "T-C13: {} toolchain RUN must mount id=toolchain-tarballs on the toolchain build dir (target/id/sharing combo)",
+            rel
+        );
+    }
+}
+
+#[test]
+fn t_c14_spack_synthesized_cache_mount_fields() {
+    // (version, mpi, cpu): pre-2026 release, 2026.x release, master.
+    let cases: [(&str, &str, &str); 3] = [
+        ("2025.2", "mpich", "x86_64"),
+        ("2026.1", "openmpi", "cascadelake"),
+        ("master", "mpich", "x86_64"),
+    ];
+    let apt_spec = "--mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked";
+    let spack_src_spec =
+        "--mount=type=cache,target=/opt/spack-source-cache,id=spack-src,sharing=locked";
+    for (version, mpi, cpu) in cases {
+        let c = base_config("spack", version, mpi, cpu, "none", "psmp");
+        let content = generate_dockerfile_content(&c).expect("render spack template");
+        let (stage1, stage2) = split_stages(&content);
+
+        assert!(
+            stage1.contains(apt_spec) && stage2.contains(apt_spec),
+            "T-C14: synthesized spack {} must mount apt-2404 in BOTH stages (stage1 hit: {}, stage2 hit: {})",
+            version,
+            stage1.contains(apt_spec),
+            stage2.contains(apt_spec)
+        );
+        // Fixed source-cache path (plan default 7): the install RUN and
+        // the `spack install --source` RUN must both carry the mount.
+        assert!(
+            content.matches(spack_src_spec).count() >= 2,
+            "T-C14: synthesized spack {} must mount id=spack-src on /opt/spack-source-cache in at least the install and --source RUNs",
+            version
+        );
+        assert!(
+            content.contains("spack config add config:source_cache:/opt/spack-source-cache"),
+            "T-C14: synthesized spack {} must pin the fixed cache path via 'spack config add config:source_cache:...'",
+            version
+        );
+
+        // canon-git: version-keyed id + REF on one line; master pins
+        // REF=master (plan default 10).
+        let expected_id = format!("id=cp2k-src-{}", version);
+        let expected_ref = if version == "master" {
+            "REF=master;".to_string()
+        } else {
+            format!("REF=support/v{};", version)
+        };
+        let git_line = line_containing(
+            &content,
+            &expected_id,
+            &format!(
+                "synthesized spack {} canon-git block keyed {}",
+                version, expected_id
+            ),
+        );
+        assert_canon_git_line(git_line, &expected_ref);
+
+        assert!(
+            !content.contains("{{"),
+            "T-C14: no template placeholder may survive rendering (synthesized spack {}):\n{}",
+            version,
+            content
+        );
+    }
+}
+
+#[test]
+fn t_c14_toolchain_synthesized_cache_mount_fields() {
+    // (version, mpi, cpu, cuda): 2023.2 plain, 2023.2 CUDA, master plain.
+    let cases: [(&str, &str, &str, &str); 3] = [
+        ("2023.2", "mpich", "generic", "none"),
+        ("2023.2", "mpich", "generic", "P100"),
+        ("master", "mpich", "generic", "none"),
+    ];
+    let apt_spec = "--mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked";
+    let tarball_spec =
+        "--mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarballs,sharing=locked";
+    for (version, mpi, cpu, cuda) in cases {
+        let c = base_config("toolchain", version, mpi, cpu, cuda, "psmp");
+        let content = generate_dockerfile_content(&c).expect("render toolchain template");
+        let (stage1, stage2) = split_stages(&content);
+
+        assert!(
+            stage1.contains(apt_spec) && stage2.contains(apt_spec),
+            "T-C14: synthesized toolchain {} (cuda={}) must mount apt-2204 in BOTH stages (stage1 hit: {}, stage2 hit: {})",
+            version,
+            cuda,
+            stage1.contains(apt_spec),
+            stage2.contains(apt_spec)
+        );
+        assert!(
+            content.contains(tarball_spec),
+            "T-C14: synthesized toolchain {} (cuda={}) must mount id=toolchain-tarballs on the toolchain build dir (target/id/sharing combo)",
+            version,
+            cuda
+        );
+
+        let expected_id = format!("id=cp2k-src-{}", version);
+        let expected_ref = if version == "master" {
+            "REF=master;".to_string()
+        } else {
+            format!("REF=support/v{};", version)
+        };
+        let git_line = line_containing(
+            &content,
+            &expected_id,
+            &format!(
+                "synthesized toolchain {} (cuda={}) canon-git block keyed {}",
+                version, cuda, expected_id
+            ),
+        );
+        assert_canon_git_line(git_line, &expected_ref);
+
+        assert!(
+            !content.contains("{{"),
+            "T-C14: no template placeholder may survive rendering (synthesized toolchain {} cuda={}):\n{}",
+            version,
+            cuda,
+            content
+        );
+    }
+}
+
 #[test]
 fn t13_resolve_dockerfile_custom_paths() {
     let tmp = TempGuard::new("t13_resolve");
