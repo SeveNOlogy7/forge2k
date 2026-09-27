@@ -30,14 +30,21 @@ fn render_template(template: &str, params: &[(&str, &str)]) -> String {
 /// BuildKit cache mount (id=cp2k-src-<version>) and `cp -a`-copied out to
 /// /opt/cp2k, so a same-version rebuild refreshes via `git fetch` + `reset
 /// --hard` instead of re-downloading the full tree (plan default 2/10).
-/// Byte-identical to the canon-git line in the bundled dockerfiles.
+/// Network hardening (plan FIX1, T-CFIX1): git is pinned to HTTP/1.1 to
+/// sidestep proxy HTTP/2 framing drops, and the fresh-clone branch retries
+/// three times (removing the partial tree between attempts) since `git
+/// clone` cannot resume. Byte-identical to the canon-git line in the
+/// bundled dockerfiles.
 fn canon_git_clone_block(version: &str, git_ref: &str) -> String {
     format!(
         "RUN --mount=type=cache,target=/opt/.cache/cp2k-src,id=cp2k-src-{version},sharing=locked \
-bash -c 'set -e; C=/opt/.cache/cp2k-src; REF={git_ref}; if [ -d \"$C/HEAD/.git\" ]; then \
+bash -c 'set -e; C=/opt/.cache/cp2k-src; REF={git_ref}; \
+git config --global http.version HTTP/1.1; if [ -d \"$C/HEAD/.git\" ]; then \
 git -C \"$C/HEAD\" fetch origin \"$REF\" && git -C \"$C/HEAD\" reset --hard FETCH_HEAD && \
-git -C \"$C/HEAD\" submodule update --init --recursive; else git clone --recursive -b \"$REF\" \
-https://github.com/cp2k/cp2k.git \"$C/HEAD\"; fi && mkdir -p /opt/cp2k && cp -a \"$C/HEAD/.\" /opt/cp2k/'"
+git -C \"$C/HEAD\" submodule update --init --recursive; else for i in 1 2 3; do \
+git clone --recursive -b \"$REF\" https://github.com/cp2k/cp2k.git \"$C/HEAD\" && break; \
+rm -rf \"$C/HEAD\"; [ $i -eq 3 ] && exit 1; sleep 10; done; fi && mkdir -p /opt/cp2k && \
+cp -a \"$C/HEAD/.\" /opt/cp2k/'"
     )
 }
 

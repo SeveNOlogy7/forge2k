@@ -10,7 +10,7 @@ FROM ${BASE_IMAGE} AS build_cp2k
 # Install packages required to build the CP2K dependencies with Spack
 RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
-    apt-get update -qq && apt-get install -qq --no-install-recommends \
+    apt-get update -o Acquire::Retries=3 -qq && apt-get install -o Acquire::Retries=3 -qq --no-install-recommends \
     g++ gcc gfortran python3 \
     automake \
     bzip2 \
@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
     zstd && rm -rf /var/lib/apt/lists/*
 
 # Download CP2K
-RUN --mount=type=cache,target=/opt/.cache/cp2k-src,id=cp2k-src-2025.2,sharing=locked bash -c 'set -e; C=/opt/.cache/cp2k-src; REF=support/v2025.2; if [ -d "$C/HEAD/.git" ]; then git -C "$C/HEAD" fetch origin "$REF" && git -C "$C/HEAD" reset --hard FETCH_HEAD && git -C "$C/HEAD" submodule update --init --recursive; else git clone --recursive -b "$REF" https://github.com/cp2k/cp2k.git "$C/HEAD"; fi && mkdir -p /opt/cp2k && cp -a "$C/HEAD/." /opt/cp2k/'
+RUN --mount=type=cache,target=/opt/.cache/cp2k-src,id=cp2k-src-2025.2,sharing=locked bash -c 'set -e; C=/opt/.cache/cp2k-src; REF=support/v2025.2; git config --global http.version HTTP/1.1; if [ -d "$C/HEAD/.git" ]; then git -C "$C/HEAD" fetch origin "$REF" && git -C "$C/HEAD" reset --hard FETCH_HEAD && git -C "$C/HEAD" submodule update --init --recursive; else for i in 1 2 3; do git clone --recursive -b "$REF" https://github.com/cp2k/cp2k.git "$C/HEAD" && break; rm -rf "$C/HEAD"; [ $i -eq 3 ] && exit 1; sleep 10; done; fi && mkdir -p /opt/cp2k && cp -a "$C/HEAD/." /opt/cp2k/'
 
 # Retrieve the number of available CPU cores
 ARG NUM_PROCS
@@ -128,7 +128,7 @@ FROM ${BASE_IMAGE} AS runtime
 # Install required packages
 RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
-    apt-get update -qq && apt-get install -qq --no-install-recommends \
+    apt-get update -o Acquire::Retries=3 -qq && apt-get install -o Acquire::Retries=3 -qq --no-install-recommends \
     g++ gcc gfortran python3 && rm -rf /var/lib/apt/lists/*
 
 # Import build arguments from base image
