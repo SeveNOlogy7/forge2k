@@ -92,6 +92,25 @@ forge2k list
 
 推送 `v*` tag（如 `v1.0.1`）会触发 `.github/workflows/release.yml`：先跑 fmt/clippy/test 门禁，再双平台 release 构建、产物冒烟，最后把 zip（二进制 + README）上传为 **GitHub Release 草稿**，由维护者手动 publish。
 
+## 构建缓存
+
+重复构建同版本镜像时，六份捆绑 Dockerfile 与合成 Dockerfile 通过 **BuildKit cache mounts** 复用下载，`--no-cache` 重建或层缓存被逐出时依然命中：
+
+| 下载向量 | cache id | 共享范围 |
+|---|---|---|
+| apt 包 | `apt-2404`（spack 系）/ `apt-2204`（toolchain 系） | 同基础发行版的全部构建 |
+| CP2K 源码 | `cp2k-src-<版本>`（如 `cp2k-src-2025.2`） | 同版本全部变体；重建时 `git fetch+reset+submodule update` 增量刷新 |
+| Spack 包源码 | `spack-src` | 全部 spack 变体（含 CUDA） |
+| toolchain tarballs | `toolchain-tarballs` | 全部 toolchain 变体（含 CUDA） |
+
+要点：
+
+- cache mount 由 BuildKit 管理，**独立于镜像层缓存**：层失效或 `--no-cache` 只重建层，下载缓存仍命中。二次构建的提速幅度 = 下载段（apt/源码/包源码），编译段仍会重跑。
+- 清空缓存：`docker builder prune --filter type=exec.cachemount`
+- 缓存磁盘占用约 5-6GB（估计值，以 `docker system df` 实测为准）。
+- 注意 named volume（`docker run -v`）与这里的 cache mount 无关：前者是运行期数据卷，后者是构建期缓存，由 BuildKit 自动管理、无需手工挂载。
+- 镜像 pull 加速是另一层，走 `forge2k mirror` 子命令（改 daemon.json 的 registry mirror）。
+
 ## 项目结构
 
 ```

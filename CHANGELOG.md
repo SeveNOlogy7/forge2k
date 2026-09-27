@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### Added（第三期镜像与卷缓存优化）
+
+- **BuildKit cache mounts**：六份捆绑 Dockerfile 与两份模板对四类下载向量加缓存——apt（`apt-2404`/`apt-2204`）、CP2K 源码（`cp2k-src-<版本>`，seed-copy + 增量 fetch 刷新）、Spack 包源码（`spack-src`）、toolchain tarballs（`toolchain-tarballs`）；`--no-cache` 重建与层缓存逐出时下载仍命中
+- `generate.rs` 的 git clone 生成器同步为 canon-git 块（版本进 cache id，master 走 REF=master 刷新路径）
+- 字段断言测试：bundled 六文件 stage 分段 mount 断言 + synthesized 三版本组合断言（测试 28 → 32）
+- README 新增"构建缓存"节：cache id 表、`--no-cache` 语义、purge 命令、named volume 与 cache mount 的三层澄清
+
+### Changed（第三期镜像与卷缓存优化）
+
+- 两个构建体系假设前置实证成立：toolchain 脚本 BUILDDIR + tarball skip-if-exists；Spack 1.2.2 `config:source_cache` 键有效
+
 ### Added（第二期优化设计）
 
 - **模块化架构**：2199 行的 `build.rs` 拆分为 `src/build/` 六个子模块（mod/execute/registry/catalog/generate/docker）+ `tests.rs`，纯移动零行为变更
