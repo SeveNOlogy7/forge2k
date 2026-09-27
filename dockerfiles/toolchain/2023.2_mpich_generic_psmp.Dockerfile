@@ -7,16 +7,19 @@
 FROM ubuntu:22.04 AS build
 
 # Install packages required for the CP2K toolchain build
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
+    apt-get update -qq && apt-get install -qq --no-install-recommends \
     g++ gcc gfortran libmpich-dev mpich openssh-client python3 \
     bzip2 ca-certificates git make patch pkg-config unzip wget zlib1g-dev
 
 # Download CP2K
-RUN git clone --recursive -b support/v2023.2 https://github.com/cp2k/cp2k.git /opt/cp2k
+RUN --mount=type=cache,target=/opt/.cache/cp2k-src,id=cp2k-src-2023.2,sharing=locked bash -c 'set -e; C=/opt/.cache/cp2k-src; REF=support/v2023.2; if [ -d "$C/HEAD/.git" ]; then git -C "$C/HEAD" fetch origin "$REF" && git -C "$C/HEAD" reset --hard FETCH_HEAD && git -C "$C/HEAD" submodule update --init --recursive; else git clone --recursive -b "$REF" https://github.com/cp2k/cp2k.git "$C/HEAD"; fi && mkdir -p /opt/cp2k && cp -a "$C/HEAD/." /opt/cp2k/'
 
 # Build CP2K toolchain for target CPU generic
 WORKDIR /opt/cp2k/tools/toolchain
-RUN /bin/bash -c -o pipefail \
+RUN --mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarballs,sharing=locked \
+    /bin/bash -c -o pipefail \
     "./install_cp2k_toolchain.sh -j 8 \
      --install-all \
      --enable-cuda=no \
@@ -51,7 +54,9 @@ RUN /bin/bash -c -o pipefail \
 FROM ubuntu:22.04 AS install
 
 # Install required packages
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
+    apt-get update -qq && apt-get install -qq --no-install-recommends \
     g++ gcc gfortran libmpich-dev mpich openssh-client python3 && rm -rf /var/lib/apt/lists/*
 
 # Install CP2K binaries
