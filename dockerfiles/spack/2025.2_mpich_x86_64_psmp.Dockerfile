@@ -8,7 +8,9 @@ ARG BASE_IMAGE="ubuntu:24.04"
 FROM ${BASE_IMAGE} AS build_cp2k
 
 # Install packages required to build the CP2K dependencies with Spack
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
+    apt-get update -qq && apt-get install -qq --no-install-recommends \
     g++ gcc gfortran python3 \
     automake \
     bzip2 \
@@ -35,7 +37,7 @@ RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
     zstd && rm -rf /var/lib/apt/lists/*
 
 # Download CP2K
-RUN git clone --recursive -b support/v2025.2 https://github.com/cp2k/cp2k.git /opt/cp2k
+RUN --mount=type=cache,target=/opt/.cache/cp2k-src,id=cp2k-src-2025.2,sharing=locked bash -c 'set -e; C=/opt/.cache/cp2k-src; REF=support/v2025.2; if [ -d "$C/HEAD/.git" ]; then git -C "$C/HEAD" fetch origin "$REF" && git -C "$C/HEAD" reset --hard FETCH_HEAD && git -C "$C/HEAD" submodule update --init --recursive; else git clone --recursive -b "$REF" https://github.com/cp2k/cp2k.git "$C/HEAD"; fi && mkdir -p /opt/cp2k && cp -a "$C/HEAD/." /opt/cp2k/'
 
 # Retrieve the number of available CPU cores
 ARG NUM_PROCS
@@ -82,7 +84,8 @@ RUN test -f /opt/cp2k/tools/spack/cp2k_deps_all_${CP2K_VERSION}.yaml && \
 # Install CP2K dependencies via Spack
 RUN spack -e myenv concretize -f
 ENV SPACK_ENV_VIEW="${SPACK_ROOT}/var/spack/environments/myenv/spack-env/view"
-RUN spack -e myenv env depfile -o spack_makefile && \
+RUN --mount=type=cache,target=/opt/spack-1.2.2/var/spack/cache,id=spack-src,sharing=locked \
+    spack -e myenv env depfile -o spack_makefile && \
     make -j${NUM_PROCS} --file=spack_makefile SPACK_COLOR=never --output-sync=recurse
 
 # Export the Spack environment view for the CMake build
@@ -123,7 +126,9 @@ RUN echo "${CP2K_VERSION}" >/CP2K_VERSION
 FROM ${BASE_IMAGE} AS runtime
 
 # Install required packages
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
+    apt-get update -qq && apt-get install -qq --no-install-recommends \
     g++ gcc gfortran python3 && rm -rf /var/lib/apt/lists/*
 
 # Import build arguments from base image
