@@ -5,7 +5,9 @@
 
 FROM ubuntu:24.04 AS build_cp2k
 
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
+    apt-get update -qq && apt-get install -qq --no-install-recommends \
     g++ gcc gfortran python3 autoconf automake bzip2 ca-certificates cmake git \
     less libncurses-dev libssh-dev libssl-dev libtool-bin lsb-release make \
     ninja-build openssh-client patch pkgconf python3-dev python3-pip \
@@ -49,19 +51,25 @@ RUN cat /opt/cp2k/tools/spack/{{DEPS_YAML}} && \
 RUN git config --global http.sslVerify false && \
     spack -e myenv concretize -f --deprecated
 ENV SPACK_ENV_VIEW="/opt/spack-${SPACK_VERSION}/var/spack/environments/myenv/spack-env/view"
-RUN git config --global http.sslVerify false && \
+RUN --mount=type=cache,target=/opt/spack-source-cache,id=spack-src,sharing=locked \
+    git config --global http.sslVerify false && \
+    spack config add config:source_cache:/opt/spack-source-cache && \
     spack -e myenv install
 
 WORKDIR /opt/cp2k
-RUN cp /opt/cp2k/tools/spack/spack_env_relocate.sh . && \
+RUN --mount=type=cache,target=/opt/spack-source-cache,id=spack-src,sharing=locked \
+    cp /opt/cp2k/tools/spack/spack_env_relocate.sh . && \
     cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/*.patch . && \
     cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/*.sh . && \
     bash -c "source /opt/spack-${SPACK_VERSION}/share/spack/setup-env.sh && \
              spack env activate myenv && \
+             spack config add config:source_cache:/opt/spack-source-cache && \
              spack build-env -- spack install --source cp2k@${CP2K_VERSION}"
 
 FROM ubuntu:24.04 AS runtime
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
+    apt-get update -qq && apt-get install -qq --no-install-recommends \
     g++ gcc gfortran ca-certificates libgomp1 libopenblas-dev \
     libmpich-dev libpython3-dev libstdc++-13-dev python3 python3-dev \
     && rm -rf /var/lib/apt/lists/*

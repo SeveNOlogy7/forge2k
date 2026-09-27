@@ -353,8 +353,9 @@ fn t13_spack_dockerfile_synthesized_key_fields() {
         "T-013: spack image must start FROM ubuntu:24.04"
     );
     assert!(
-        content.contains("git clone --recursive -b support/v2025.2"),
-        "T-013: release build must clone the support/v<version> branch"
+        content.contains("id=cp2k-src-2025.2,sharing=locked")
+            && content.contains("REF=support/v2025.2;"),
+        "T-013: release build must seed cp2k-src-2025.2 cache and pin REF=support/v2025.2"
     );
     assert!(
         content.contains("ARG NUM_PROCS"),
@@ -442,8 +443,8 @@ fn t13_toolchain_dockerfile_synthesized_key_fields() {
     let c = base_config("toolchain", "master", "mpich", "generic", "none", "psmp");
     let content = generate_dockerfile_content(&c).expect("render toolchain template");
     assert!(
-        content.contains("git clone --recursive https://github.com/cp2k/cp2k.git"),
-        "T-013: master must clone the default branch (no -b support/...)"
+        content.contains("id=cp2k-src-master,sharing=locked") && content.contains("REF=master;"),
+        "T-013: master build must seed cp2k-src-master cache and pin REF=master"
     );
     assert!(
         content.contains("cmake -GNinja"),

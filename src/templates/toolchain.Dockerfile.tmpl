@@ -7,7 +7,9 @@ FROM {{BASE_IMAGE}} AS build
 
 {{CUDA_ENV}}
 
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
+    apt-get update -qq && apt-get install -qq --no-install-recommends \
     autoconf autogen automake autotools-dev \
     bzip2 ca-certificates \
     g++ gcc gfortran git less libtool libtool-bin \
@@ -18,7 +20,8 @@ RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
 {{GIT_CLONE}}
 
 WORKDIR /opt/cp2k/tools/toolchain
-RUN ./install_cp2k_toolchain.sh -j ${NUM_PROCS:-8} \
+RUN --mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarballs,sharing=locked \
+    ./install_cp2k_toolchain.sh -j ${NUM_PROCS:-8} \
     --install-all \
     --enable-cuda={{CUDA_FLAG}} {{CUDA_EXTRA}} --with-deepmd=no \
     --target-cpu={{CPU}} \
@@ -29,7 +32,9 @@ RUN ./install_cp2k_toolchain.sh -j ${NUM_PROCS:-8} \
 {{BUILD_STEP}}
 
 FROM {{BASE_IMAGE}} AS install
-RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
+    apt-get update -qq && apt-get install -qq --no-install-recommends \
     g++ gcc gfortran libmpich-dev mpich openssh-client python3 \
     && rm -rf /var/lib/apt/lists/*
 

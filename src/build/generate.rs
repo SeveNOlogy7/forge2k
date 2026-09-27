@@ -26,6 +26,21 @@ fn render_template(template: &str, params: &[(&str, &str)]) -> String {
     out
 }
 
+/// Build the canon-git `RUN` block: cp2k is cloned into a per-version
+/// BuildKit cache mount (id=cp2k-src-<version>) and `cp -a`-copied out to
+/// /opt/cp2k, so a same-version rebuild refreshes via `git fetch` + `reset
+/// --hard` instead of re-downloading the full tree (plan default 2/10).
+/// Byte-identical to the canon-git line in the bundled dockerfiles.
+fn canon_git_clone_block(version: &str, git_ref: &str) -> String {
+    format!(
+        "RUN --mount=type=cache,target=/opt/.cache/cp2k-src,id=cp2k-src-{version},sharing=locked \
+bash -c 'set -e; C=/opt/.cache/cp2k-src; REF={git_ref}; if [ -d \"$C/HEAD/.git\" ]; then \
+git -C \"$C/HEAD\" fetch origin \"$REF\" && git -C \"$C/HEAD\" reset --hard FETCH_HEAD && \
+git -C \"$C/HEAD\" submodule update --init --recursive; else git clone --recursive -b \"$REF\" \
+https://github.com/cp2k/cp2k.git \"$C/HEAD\"; fi && mkdir -p /opt/cp2k && cp -a \"$C/HEAD/.\" /opt/cp2k/'"
+    )
+}
+
 /// Generate Dockerfile content from build config
 pub(crate) fn generate_dockerfile_content(config: &BuildConfig) -> Result<String> {
     match config.method.as_str() {
@@ -39,9 +54,9 @@ fn generate_spack_dockerfile(config: &BuildConfig) -> Result<String> {
     let mpi = &config.mpi;
     let version = &config.version;
     let git_clone = if version == "master" {
-        "RUN git clone --recursive https://github.com/cp2k/cp2k.git /opt/cp2k".to_string()
+        canon_git_clone_block(version, "master")
     } else {
-        format!("RUN git clone --recursive -b support/v{version} https://github.com/cp2k/cp2k.git /opt/cp2k")
+        canon_git_clone_block(version, &format!("support/v{version}"))
     };
 
     // v2026.1+ renamed cp2k_deps_all_psmp.yaml -> cp2k_deps_psmp.yaml
@@ -127,12 +142,9 @@ fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
     };
     let use_cmake = config.version == "master";
     let git_clone = if config.version == "master" {
-        "RUN git clone --recursive https://github.com/cp2k/cp2k.git /opt/cp2k".to_string()
+        canon_git_clone_block(&config.version, "master")
     } else {
-        format!(
-            "RUN git clone --recursive -b support/v{} https://github.com/cp2k/cp2k.git /opt/cp2k",
-            config.version
-        )
+        canon_git_clone_block(&config.version, &format!("support/v{}", config.version))
     };
 
     let build_step = if use_cmake {
