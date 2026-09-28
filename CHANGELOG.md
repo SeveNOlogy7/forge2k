@@ -9,7 +9,8 @@
 - **BuildKit cache mounts**：六份捆绑 Dockerfile 与两份模板对四类下载向量加缓存——apt（`apt-2404`/`apt-2204`）、CP2K 源码（`cp2k-src-<版本>`，seed-copy + 增量 fetch 刷新）、Spack 包源码（`spack-src`）、toolchain tarballs（`toolchain-tarballs`）；`--no-cache` 重建与层缓存逐出时下载仍命中
 - `generate.rs` 的 git clone 生成器同步为 canon-git 块（版本进 cache id，master 走 REF=master 刷新路径）
 - 字段断言测试：bundled 六文件 stage 分段 mount 断言 + synthesized 三版本组合断言（测试 28 → 32）
-- README 新增"构建缓存"节：cache id 表、`--no-cache` 语义、purge 命令、named volume 与 cache mount 的三层澄清
+- README 新增"构建缓存"节：cache id 表、实测的 `--no-cache` 语义、purge 命令、named volume 与 cache mount 的三层澄清
+- **e2e 量化验证**：apt 段 ~26 倍提速（683s→26s）、CP2K 源码 clone（5-8 分钟）→ fetch 秒级、spack-src mount 命中下 spack install 零网络行；`cp2k/cp2k:2025.2_mpich_x86_64_psmp` 与 `:2023.2_mpich_generic_psmp` 双镜像构建 + `cp2k --version` 冒烟通过
 
 ### Changed（第三期镜像与卷缓存优化）
 

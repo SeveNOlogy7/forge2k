@@ -105,7 +105,9 @@ forge2k list
 
 要点：
 
-- cache mount 由 BuildKit 管理，**独立于镜像层缓存**：层失效或 `--no-cache` 只重建层，下载缓存仍命中。二次构建的提速幅度 = 下载段（apt/源码/包源码），编译段仍会重跑。
+- cache mount 由 BuildKit 管理，**独立于镜像层缓存**：Dockerfile 变更导致的层失效不影响下载缓存。二次构建的提速幅度 = 下载段（实测：apt ~26 倍、CP2K 源码 clone 5-8 分钟 → fetch 秒级、toolchain tarball 直接跳过），编译段仍会重跑。
+- **`--no-cache` 注意**：实测（Docker Desktop 29.x）`--no-cache` 构建中 cache mount 视图为空、不命中既有缓存——如只想利用下载缓存，请通过修改 Dockerfile 制造层失效，而非 `--no-cache`。
+- toolchain 安装带**自愈重试**：下载中断留下的残缺 tar 包会被自动清理并重下（skip-if-exists 只信完好文件）。
 - 清空缓存：`docker builder prune --filter type=exec.cachemount`
 - 缓存磁盘占用约 5-6GB（估计值，以 `docker system df` 实测为准）。
 - 注意 named volume（`docker run -v`）与这里的 cache mount 无关：前者是运行期数据卷，后者是构建期缓存，由 BuildKit 自动管理、无需手工挂载。
