@@ -69,11 +69,14 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & ./target/release/forge2k.exe list
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "::error::'forge2k list' exited with $LASTEXITCODE"
+          # GUI-subsystem binaries do NOT populate pwsh's $LASTEXITCODE (it stays
+          # empty/null for them), so capture the real exit code via Start-Process.
+          $p = Start-Process -FilePath "./target/release/forge2k.exe" -ArgumentList "list" -Wait -PassThru
+          if ($p.ExitCode -ne 0) {
+            Write-Error "::error::'forge2k list' exited with $($p.ExitCode)"
             exit 1
           }
+          Write-Host "windows smoke ok: forge2k list exit=$($p.ExitCode)"
 
       - name: Package zip
         shell: pwsh
