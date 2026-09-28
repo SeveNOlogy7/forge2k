@@ -1,6 +1,6 @@
 [package]
 name = "forge2k"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Forge2K - One-click CP2K Docker Image Builder with beautiful GUI + CLI"
 authors = ["Forge2K"]

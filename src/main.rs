@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 #[derive(Parser)]
 #[command(
     name = "forge2k",
-    version = "1.0.0",
+    version = "1.0.1",
     about = "🔥 Forge2K - One-click CP2K Docker Image Builder",
     long_about = "Forge2K: A beautiful GUI+CLI tool for building CP2K Docker images.\n\
                    Supports Spack-based (v2025.2+), Toolchain-based (v2023.2+), and\n\
@@ -712,7 +712,7 @@ fn print_banner() {
     println!("{}", "╔══════════════════════════════════════╗".yellow());
     println!(
         "{}",
-        "║          Forge2K  v1.0.0            ║".yellow().bold()
+        "║          Forge2K  v1.0.1            ║".yellow().bold()
     );
     println!("{}", "║   CP2K Docker Image Builder         ║".yellow());
     println!("{}", "╚══════════════════════════════════════╝".yellow());

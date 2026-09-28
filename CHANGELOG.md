@@ -4,9 +4,11 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-09-28
+
 ### Added（第三期镜像与卷缓存优化）
 
-- **BuildKit cache mounts**：六份捆绑 Dockerfile 与两份模板对四类下载向量加缓存——apt（`apt-2404`/`apt-2204`）、CP2K 源码（`cp2k-src-<版本>`，seed-copy + 增量 fetch 刷新）、Spack 包源码（`spack-src`）、toolchain tarballs（`toolchain-tarballs`）；`--no-cache` 重建与层缓存逐出时下载仍命中
+- **BuildKit cache mounts**：六份捆绑 Dockerfile 与两份模板对四类下载向量加缓存——apt（`apt-2404`/`apt-2204`）、CP2K 源码（`cp2k-src-<版本>`，seed-copy + 增量 fetch 刷新）、Spack 包源码（`spack-src`）、toolchain tarballs（`toolchain-tarballs`；构建期下载缓存，named volume 的构建期正解）
 - `generate.rs` 的 git clone 生成器同步为 canon-git 块（版本进 cache id，master 走 REF=master 刷新路径）
 - 字段断言测试：bundled 六文件 stage 分段 mount 断言 + synthesized 三版本组合断言（测试 28 → 32）
 - README 新增"构建缓存"节：cache id 表、实测的 `--no-cache` 语义、purge 命令、named volume 与 cache mount 的三层澄清
@@ -15,6 +17,12 @@
 ### Changed（第三期镜像与卷缓存优化）
 
 - 两个构建体系假设前置实证成立：toolchain 脚本 BUILDDIR + tarball skip-if-exists；Spack 1.2.2 `config:source_cache` 键有效
+
+### Fixed（第三期镜像与卷缓存优化）
+
+- canon 网络健壮性：clone 三级重试 + HTTP/1.1、apt `Acquire::Retries=3`（真实代理瞬断下四次 clone 全部存活）
+- torch symlink 探针修复补齐 mpich 两变体（fix-wave-2 仅覆盖 openmpi）
+- toolchain 安装自愈重试环：下载中断的残缺 tar 不再毒化缓存 mount（失败自动清理重下）
 
 ### Added（第二期优化设计）
 

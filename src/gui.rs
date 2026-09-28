@@ -299,7 +299,7 @@ impl eframe::App for Forge2kApp {
                         .strong(),
                 );
                 ui.label(
-                    RichText::new("v1.0.0")
+                    RichText::new("v1.0.1")
                         .size(12.0)
                         .color(Color32::from_rgb(120, 120, 140)),
                 );
@@ -1086,7 +1086,7 @@ impl Forge2kApp {
                     .strong(),
             );
             ui.label(
-                RichText::new("Version 1.0.0")
+                RichText::new("Version 1.0.1")
                     .size(14.0)
                     .color(Color32::from_rgb(120, 120, 140)),
             );

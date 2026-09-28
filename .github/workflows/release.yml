@@ -54,7 +54,7 @@ jobs:
           set -euo pipefail
           version_output="$(./target/release/forge2k --version)"
           echo "$version_output"
-          grep -q '^forge2k 1\.0\.0$' <<< "$version_output" \
+          grep -q '^forge2k 1.0.1$' <<< "$version_output" \
             || { echo "::error::unexpected --version output: $version_output"; exit 1; }
           list_output="$(./target/release/forge2k list)"
           echo "$list_output"
