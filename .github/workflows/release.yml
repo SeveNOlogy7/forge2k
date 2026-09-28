@@ -114,6 +114,10 @@ jobs:
   release:
     name: draft GitHub Release
     needs: build
+    # GITHUB_TOKEN defaults to read-only; creating a release requires
+    # contents: write (403 "Resource not accessible by integration" otherwise).
+    permissions:
+      contents: write
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
