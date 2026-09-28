@@ -7,12 +7,12 @@
 FROM nvidia/cuda:12.2.0-devel-ubuntu22.04 AS build
 
 # Setup CUDA environment
-ENV CUDA_PATH /usr/local/cuda
-ENV LD_LIBRARY_PATH /usr/local/cuda/lib64
+ENV CUDA_PATH=/usr/local/cuda
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64
 
 # Disable JIT cache as there seems to be an issue with file locking on overlayfs
 # See also https://github.com/cp2k/cp2k/pull/2337
-ENV CUDA_CACHE_DISABLE 1
+ENV CUDA_CACHE_DISABLE=1
 
 # Install packages required for the CP2K toolchain build
 RUN --mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked \

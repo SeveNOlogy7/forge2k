@@ -254,7 +254,7 @@ exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint
             (
                 "CUDA_ENV",
                 if cuda_enabled {
-                    "ENV CUDA_PATH /usr/local/cuda\nENV LD_LIBRARY_PATH /usr/local/cuda/lib64\nENV CUDA_CACHE_DISABLE 1"
+                    "ENV CUDA_PATH=/usr/local/cuda\nENV LD_LIBRARY_PATH=/usr/local/cuda/lib64\nENV CUDA_CACHE_DISABLE=1"
                 } else {
                     ""
                 },
