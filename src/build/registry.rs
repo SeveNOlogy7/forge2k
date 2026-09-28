@@ -106,9 +106,9 @@ fn test_mirror(url: &str) -> bool {
         match output {
             Ok(out) => {
                 let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                return code == "200" || code == "401"; // 401 means registry exists but auth required
+                code == "200" || code == "401" // 401 means registry exists but auth required
             }
-            Err(_) => return false,
+            Err(_) => false,
         }
     }
 }
