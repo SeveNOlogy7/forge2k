@@ -1,0 +1,56 @@
+name: E2E image build
+
+# Manual, on-demand full image build verification on a GitHub runner.
+# Local proxy networks are unreliable for large transfers (cp2k git clone,
+# nvidia/cuda base images); the runner network is not. Run this from the
+# Actions tab ("Run workflow") to validate the bundled Dockerfiles end to end.
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: CUDA variant of the toolchain image to build
+        type: choice
+        required: true
+        default: cuda_P100
+        options:
+          - cuda_P100
+          - cuda_V100
+
+jobs:
+  e2e-image:
+    name: e2e toolchain image (${{ inputs.variant }})
+    runs-on: ubuntu-latest
+    # Toolchain build on a 4-core runner is expected to take 1.5-3h;
+    # 330 min leaves headroom under the 6h GitHub hard cap.
+    timeout-minutes: 330
+    env:
+      # Map the dispatch choice to the forge2k --cuda value.
+      CUDA: ${{ inputs.variant == 'cuda_V100' && 'V100' || 'P100' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo build (debug binary used to drive docker build)
+        run: cargo build
+
+      - name: forge2k build -m toolchain -v 2023.2 --cpu generic --cuda $CUDA
+        timeout-minutes: 300
+        run: |
+          set -o pipefail
+          ./target/debug/forge2k build -m toolchain -v 2023.2 --cpu generic --cuda "$CUDA" 2>&1 | tee build-log.txt
+
+      - name: smoke test docker run cp2k --version (no NVIDIA driver on runner; tolerated)
+        run: |
+          echo "=== smoke begin: docker run --rm cp2k/cp2k:2023.2_mpich_generic_cuda_${CUDA}_psmp cp2k --version ==="
+          docker run --rm cp2k/cp2k:2023.2_mpich_generic_cuda_${CUDA}_psmp cp2k --version || true
+          echo "=== smoke end: runner has no NVIDIA driver, so this may fail without invalidating the job; the forge2k build step above is the acceptance gate ==="
+
+      - name: upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ inputs.variant }}
+          path: build-log.txt
