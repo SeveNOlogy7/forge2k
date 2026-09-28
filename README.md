@@ -147,6 +147,6 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 时于 ubuntu / windows 双平
 
 - Windows release 构建是 GUI 子系统，CLI 无 stdout（退出码正常）；debug 构建不受影响
 - native 构建仅支持默认参数组合，GUI 中选择不支持组合会显式报错
-- CUDA P100/V100 toolchain 变体与其他变体共享修复，但未单独做过全量镜像构建
+- CUDA P100/V100 变体已在 GitHub Actions 完成全量构建验证（2026-09-29，均成功）；容器内 `cp2k --version` 需 NVIDIA 驱动（无 GPU 主机因缺 libcuda.so.1 无法运行，属环境边界非镜像缺陷）
 - 2026.1 / master 走 synthesized 合成路径（见上）
 - `mirror --restart` 在 Windows 上经 `cmd /C start` 重启 Docker Desktop，未做破坏性端到端验证

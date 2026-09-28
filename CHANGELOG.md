@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added（第四期 CUDA 验证）
+
+- CUDA P100/V100 两变体在 GitHub Actions 完成独立全量构建验证（均成功）；新增 workflow_dispatch 手动触发的 `E2E image build` workflow 作为按需镜像验证工具
+
+### Fixed（第四期镜像 hygiene）
+
+- CUDA Dockerfile 与合成生成器的 legacy `ENV K V` 语法改为 `K=value` 等值形式，BuildKit LegacyKeyValueFormat 警告全仓清零
+
 ## [1.0.1] - 2026-09-28
 
 ### Added（第三期镜像与卷缓存优化）
