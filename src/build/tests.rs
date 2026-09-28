@@ -811,9 +811,9 @@ fn t14_execute_build_docker_unreachable_returns_err_not_success() {
         // still resolves docker.exe get a real CLI failure mapped to the
         // graceful Ok(Failed). Either way the invariant under test holds:
         // docker unreachable must NEVER report Success.
-        Ok(BuildOutcome::Success) => panic!(
-            "T-014: execute_build with docker unreachable must not report Success"
-        ),
+        Ok(BuildOutcome::Success) => {
+            panic!("T-014: execute_build with docker unreachable must not report Success")
+        }
         Ok(other) => { /* graceful Failed/Cancelled is acceptable */ }
         Err(e) => assert!(
             e.to_string().contains("docker"),
