@@ -21,13 +21,18 @@ RUN --mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked \
 
 WORKDIR /opt/cp2k/tools/toolchain
 RUN --mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarballs,sharing=locked \
-    ./install_cp2k_toolchain.sh -j ${NUM_PROCS:-8} \
+    /bin/bash -c -o pipefail \
+    "for i in 1 2 3; do ./install_cp2k_toolchain.sh -j ${NUM_PROCS:-8} \
     --install-all \
     --enable-cuda={{CUDA_FLAG}} {{CUDA_EXTRA}} --with-deepmd=no \
     --target-cpu={{CPU}} \
     --with-cusolvermp=no \
     --with-gcc=system \
-    --with-mpich=system
+    --with-mpich=system && break; \
+    echo \"toolchain install failed (attempt \$i), cleaning build dir\"; \
+    rm -rf /opt/cp2k/tools/toolchain/build/*; \
+    [ \$i -eq 3 ] && exit 1; \
+    sleep 10; done"
 
 {{BUILD_STEP}}
 

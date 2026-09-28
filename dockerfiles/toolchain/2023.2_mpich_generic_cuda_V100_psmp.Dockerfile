@@ -28,13 +28,17 @@ RUN --mount=type=cache,target=/opt/.cache/cp2k-src,id=cp2k-src-2023.2,sharing=lo
 WORKDIR /opt/cp2k/tools/toolchain
 RUN --mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarballs,sharing=locked \
     /bin/bash -c -o pipefail \
-    "./install_cp2k_toolchain.sh -j 8 \
+    "for i in 1 2 3; do ./install_cp2k_toolchain.sh -j 8 \
      --install-all \
      --enable-cuda=yes --gpu-ver=V100 --with-libtorch=no \
      --target-cpu=generic \
      --with-cusolvermp=no \
      --with-gcc=system \
-     --with-mpich=system"
+     --with-mpich=system && break; \
+     echo \"toolchain install failed (attempt \$i), cleaning build dir\"; \
+     rm -rf /opt/cp2k/tools/toolchain/build/*; \
+     [ \$i -eq 3 ] && exit 1; \
+     sleep 10; done"
 
 # Build CP2K for target CPU generic
 WORKDIR /opt/cp2k
