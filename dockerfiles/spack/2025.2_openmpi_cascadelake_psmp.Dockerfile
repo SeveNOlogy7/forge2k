@@ -15,6 +15,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
     automake \
     bzip2 \
     ca-certificates \
+    ccache \
     cmake \
     git \
     libncurses-dev \
@@ -71,6 +72,13 @@ RUN spack compiler find
 # Find all external packages
 RUN spack external find --all --not-buildable
 
+# Register the local buildcache mirror and enable ccache for Spack builds.
+# NOTE: Spack 1.2.2 `spack config add` has no --scope flag; the plain form
+# writes /root/.spack/config.yaml (user scope, Wave 0 probe-verified).
+RUN spack config add config:ccache:true && \
+    spack mirror add --scope site --unsigned spack-bc file:///opt/spack-buildcache
+ENV CCACHE_DIR=/opt/spack-ccache
+
 # Copy Spack configuration and build recipes
 ARG CP2K_VERSION
 ENV CP2K_VERSION=${CP2K_VERSION:-psmp}
@@ -85,12 +93,22 @@ RUN sed -e 's/- mpich/- openmpi/' -e '/^\s*xpmem:/i\    openmpi:\n      require:
 RUN spack -e myenv concretize -f
 ENV SPACK_ENV_VIEW="${SPACK_ROOT}/var/spack/environments/myenv/spack-env/view"
 RUN --mount=type=cache,target=/opt/spack-1.2.2/var/spack/cache,id=spack-src,sharing=locked \
+    --mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked \
+    --mount=type=cache,target=/opt/spack-ccache,id=spack-ccache,sharing=locked \
     spack -e myenv config add 'config:uri_fetch_method:curl' && \
     spack -e myenv env depfile -o spack_makefile && \
     (make -j${NUM_PROCS} --file=spack_makefile SPACK_COLOR=never --output-sync=recurse) ||     (sleep 60 && make -j4 --file=spack_makefile SPACK_COLOR=never --output-sync=recurse) ||     (sleep 120 && make -j2 --file=spack_makefile SPACK_COLOR=never --output-sync=recurse)
 
 # Export the Spack environment view for the CMake build
 RUN cp -ar ${SPACK_ENV_VIEW}/bin ${SPACK_ENV_VIEW}/include ${SPACK_ENV_VIEW}/lib /opt/spack
+
+# Push installed packages into the local buildcache mirror (non-fatal:
+# segmented WARNs so cache-infrastructure trouble never breaks the build.
+# A warm-mirror no-op push exits 1 in Spack 1.2.2 -- benign; judge push
+# success by the "Pushed <n>/<m>" lines in the build transcript)
+RUN --mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked \
+    spack -e myenv buildcache push --unsigned spack-bc || echo "WARN: buildcache push failed (non-fatal)"; \
+    spack buildcache update-index spack-bc || echo "WARN: buildcache update-index failed (non-fatal)"
 
 # Run CMake
 # NOTE: the Spack env view keeps py-torch files as symlinks, so the find in

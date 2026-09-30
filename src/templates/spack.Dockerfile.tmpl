@@ -8,7 +8,7 @@ FROM ubuntu:24.04 AS build_cp2k
 RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
     apt-get update -o Acquire::Retries=3 -qq && apt-get install -o Acquire::Retries=3 -qq --no-install-recommends \
-    g++ gcc gfortran python3 autoconf automake bzip2 ca-certificates cmake git \
+    g++ gcc gfortran python3 autoconf automake bzip2 ca-certificates ccache cmake git \
     less libncurses-dev libssh-dev libssl-dev libtool-bin lsb-release make \
     ninja-build openssh-client patch pkgconf python3-dev python3-pip \
     python3-venv unzip wget xxd xz-utils zlib1g-dev zstd \
@@ -48,16 +48,35 @@ RUN cp -a /opt/cp2k/tools/spack/cp2k_dev_repo /opt/spack-packages-${SPACK_PACKAG
 RUN cat /opt/cp2k/tools/spack/{{DEPS_YAML}} && \
     spack env create myenv /opt/cp2k/tools/spack/{{DEPS_YAML}}
 
+# Register the local buildcache mirror and enable ccache for Spack builds.
+# Plain `spack config add` (no --scope) writes /root/.spack/config.yaml;
+# that form is version-portable (Spack 1.2.2 dropped --scope for config add; mirror add retains it).
+RUN spack config add config:ccache:true && \
+    spack mirror add --scope site --unsigned spack-bc file:///opt/spack-buildcache
+ENV CCACHE_DIR=/opt/spack-ccache
+
 RUN git config --global http.sslVerify false && \
     spack -e myenv concretize -f --deprecated
 ENV SPACK_ENV_VIEW="/opt/spack-${SPACK_VERSION}/var/spack/environments/myenv/spack-env/view"
 RUN --mount=type=cache,target=/opt/spack-source-cache,id=spack-src,sharing=locked \
+    --mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked \
+    --mount=type=cache,target=/opt/spack-ccache,id=spack-ccache,sharing=locked \
     git config --global http.sslVerify false && \
     spack config add config:source_cache:/opt/spack-source-cache && \
-    spack -e myenv install
+    spack -e myenv install --no-check-signature
+
+# Push installed dependency packages into the local buildcache mirror
+# (non-fatal: segmented WARNs; a warm-mirror no-op push exits 1 in
+# Spack 1.2.2 -- benign, judge push success by "Pushed <n>/<m>" lines.
+# cp2k itself is NOT pushed: its --source install never consumes binaries)
+RUN --mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked \
+    spack -e myenv buildcache push --unsigned spack-bc || echo "WARN: buildcache push failed (non-fatal)"; \
+    spack buildcache update-index spack-bc || echo "WARN: buildcache update-index failed (non-fatal)"
 
 WORKDIR /opt/cp2k
 RUN --mount=type=cache,target=/opt/spack-source-cache,id=spack-src,sharing=locked \
+    --mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked \
+    --mount=type=cache,target=/opt/spack-ccache,id=spack-ccache,sharing=locked \
     cp /opt/cp2k/tools/spack/spack_env_relocate.sh . && \
     cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/*.patch . && \
     cp /opt/spack-packages-${SPACK_PACKAGES_VERSION}/repos/spack_repo/cp2k_dev_repo/packages/cp2k/*.sh . && \
