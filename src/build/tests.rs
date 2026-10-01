@@ -370,6 +370,12 @@ fn t13_spack_dockerfile_synthesized_key_fields() {
         "T-013: 2025.x must pin spack 1.0.0"
     );
     assert!(
+        content.contains(
+            "spack mirror add --scope site --unsigned spack-bc file:///opt/spack-buildcache"
+        ),
+        "T-013: synthesized spack must register the unsigned local buildcache mirror spack-bc"
+    );
+    assert!(
         !content.contains("{{"),
         "T-013: no template placeholder may survive rendering, found '{{' in:\n{}",
         content
@@ -569,6 +575,85 @@ fn t_c13_bundled_spack_dockerfiles_cache_mount_fields() {
             "T-C13: {} spack install RUN must mount id=spack-src on the literal default cache path (target/id/sharing combo)",
             rel
         );
+
+        // Wave 1 (plan t10): the depfile make RUN mounts the local
+        // buildcache AND the ccache pool next to spack-src; the push RUN
+        // re-mounts the buildcache (two buildcache mounts per file), and
+        // ccache stays exclusive to the make RUN.
+        let bc_mount =
+            "--mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked";
+        assert!(
+            content.matches(bc_mount).count() >= 2,
+            "T-C13: {} must mount id=spack-buildcache on BOTH the make and the push RUNs, got {} mounts",
+            rel,
+            content.matches(bc_mount).count()
+        );
+        let ccache_mount =
+            "--mount=type=cache,target=/opt/spack-ccache,id=spack-ccache,sharing=locked";
+        assert!(
+            content.matches(ccache_mount).count() == 1,
+            "T-C13: {} must mount id=spack-ccache exactly once, on the make RUN, got {}",
+            rel,
+            content.matches(ccache_mount).count()
+        );
+
+        // Mirror/compiler-cache wiring: ccache installed via apt, spack
+        // config enables it, the mirror is added unsigned at site scope,
+        // and CCACHE_DIR points into the ccache pool.
+        assert!(
+            content.contains("    ccache \\"),
+            "T-C13: {} apt list must install ccache",
+            rel
+        );
+        assert!(
+            content.contains("spack config add config:ccache:true"),
+            "T-C13: {} must enable ccache via 'spack config add config:ccache:true'",
+            rel
+        );
+        let mirror_line = line_containing(
+            &content,
+            "file:///opt/spack-buildcache",
+            &format!("{} buildcache mirror registration", rel),
+        );
+        assert!(
+            mirror_line.contains(
+                "spack mirror add --scope site --unsigned spack-bc file:///opt/spack-buildcache"
+            ),
+            "T-C13: {} must add the unsigned site-scope spack-bc mirror, got: {}",
+            rel,
+            mirror_line
+        );
+        assert!(
+            content.contains("ENV CCACHE_DIR=/opt/spack-ccache"),
+            "T-C13: {} must point CCACHE_DIR at the spack-ccache pool",
+            rel
+        );
+
+        // Push is segmented and non-fatal: push and update-index each
+        // carry their own distinguishable WARN text on the same physical
+        // line as the command they guard.
+        let push_line = line_containing(
+            &content,
+            "buildcache push --unsigned spack-bc",
+            &format!("{} buildcache push step", rel),
+        );
+        assert!(
+            push_line.contains(r#"|| echo "WARN: buildcache push failed (non-fatal)""#),
+            "T-C13: {} push step must swallow failure with its own WARN, got: {}",
+            rel,
+            push_line
+        );
+        let index_line = line_containing(
+            &content,
+            "buildcache update-index spack-bc",
+            &format!("{} buildcache update-index step", rel),
+        );
+        assert!(
+            index_line.contains(r#"|| echo "WARN: buildcache update-index failed (non-fatal)""#),
+            "T-C13: {} update-index step must swallow failure with its own WARN, got: {}",
+            rel,
+            index_line
+        );
     }
 }
 
@@ -666,6 +751,81 @@ fn t_c14_spack_synthesized_cache_mount_fields() {
             ),
         );
         assert_canon_git_line(git_line, &expected_ref);
+
+        // Wave 2 (plan t11): the install RUN carries the buildcache and
+        // ccache pools next to spack-src; the push RUN and the cp2k
+        // --source RUN each re-mount the buildcache (3 buildcache mounts
+        // per render), ccache on install + --source only.
+        let bc_mount =
+            "--mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked";
+        assert!(
+            content.matches(bc_mount).count() >= 3,
+            "T-C14: synthesized spack {} must mount id=spack-buildcache on the install, push and --source RUNs, got {}",
+            version,
+            content.matches(bc_mount).count()
+        );
+        let ccache_mount =
+            "--mount=type=cache,target=/opt/spack-ccache,id=spack-ccache,sharing=locked";
+        assert!(
+            content.matches(ccache_mount).count() >= 2,
+            "T-C14: synthesized spack {} must mount id=spack-ccache on the install and --source RUNs, got {}",
+            version,
+            content.matches(ccache_mount).count()
+        );
+
+        // Mirror/compiler-cache wiring, same contract as the bundled
+        // variant: unsigned site-scope mirror + ccache config + ENV.
+        assert!(
+            content.contains("spack config add config:ccache:true")
+                && content.contains(
+                    "spack mirror add --scope site --unsigned spack-bc file:///opt/spack-buildcache"
+                )
+                && content.contains("ENV CCACHE_DIR=/opt/spack-ccache"),
+            "T-C14: synthesized spack {} must register the unsigned spack-bc mirror and wire CCACHE_DIR",
+            version
+        );
+
+        // Dependencies install signature-unchecked from the unsigned
+        // mirror, and the push RUN exists AFTER the dependency install
+        // (push what was just built).
+        assert!(
+            content.contains("spack -e myenv install --no-check-signature"),
+            "T-C14: synthesized spack {} must install deps with --no-check-signature from the unsigned mirror",
+            version
+        );
+        let install_at = content
+            .find("--no-check-signature")
+            .expect("T-C14: --no-check-signature marker must exist");
+        let push_at = content
+            .find("buildcache push --unsigned spack-bc")
+            .expect("T-C14: buildcache push marker must exist");
+        assert!(
+            push_at > install_at,
+            "T-C14: synthesized spack {} buildcache push RUN must come after the dependency install RUN",
+            version
+        );
+
+        // Segmented, distinguishable WARN texts (push vs update-index).
+        assert!(
+            content.contains(r#"echo "WARN: buildcache push failed (non-fatal)""#)
+                && content.contains(r#"echo "WARN: buildcache update-index failed (non-fatal)""#),
+            "T-C14: synthesized spack {} push/update-index steps must each carry their own non-fatal WARN text",
+            version
+        );
+
+        // cp2k itself is never pushed: its --source install line must not
+        // take part in any buildcache push (deps-only mirror).
+        let cp2k_source_line = line_containing(
+            &content,
+            "spack install --source cp2k",
+            &format!("synthesized spack {} cp2k --source install", version),
+        );
+        assert!(
+            !cp2k_source_line.contains("buildcache"),
+            "T-C14: synthesized spack {} must not push cp2k itself into the buildcache, got: {}",
+            version,
+            cp2k_source_line
+        );
 
         assert!(
             !content.contains("{{"),
