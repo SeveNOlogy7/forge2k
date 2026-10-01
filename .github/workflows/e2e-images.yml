@@ -8,27 +8,35 @@ on:
   workflow_dispatch:
     inputs:
       variant:
-        description: CUDA variant of the toolchain image to build
+        description: Image variant to build (CUDA toolchain or spack)
         type: choice
         required: true
         default: cuda_P100
         options:
           - cuda_P100
           - cuda_V100
+          - spack_2025.2_x86_64
 
 jobs:
   e2e-image:
-    name: e2e toolchain image (${{ inputs.variant }})
+    name: e2e image (${{ inputs.variant }})
     runs-on: ubuntu-latest
-    # Toolchain build on a 4-core runner is expected to take 1.5-3h;
-    # 330 min leaves headroom under the 6h GitHub hard cap.
-    timeout-minutes: 330
-    env:
-      # Map the dispatch choice to the forge2k --cuda value.
-      CUDA: ${{ inputs.variant == 'cuda_V100' && 'V100' || 'P100' }}
+    # Toolchain build on a 4-core runner is expected to take 1.5-3h: 330 min.
+    # Spack variant: deps compile ~4.2h + cp2k ~19min + push/transport, so 350
+    # min (step cap 340). Both stay under the 6h (360 min) GitHub hard cap.
+    timeout-minutes: ${{ inputs.variant == 'spack_2025.2_x86_64' && 350 || 330 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: guard known variant (fail fast on unexpected dispatch input)
+        env:
+          VARIANT: ${{ inputs.variant }}
+        run: |
+          case "$VARIANT" in
+            cuda_P100|cuda_V100|spack_2025.2_x86_64) echo "variant ok: $VARIANT" ;;
+            *) echo "unknown variant: $VARIANT" >&2; exit 1 ;;
+          esac
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -36,17 +44,110 @@ jobs:
       - name: cargo build (debug binary used to drive docker build)
         run: cargo build
 
+      # --- spack buildcache transport -------------------------------------
+      # actions/cache and BuildKit cache mounts are disconnected (the mount
+      # store dies with the runner), so the content is ferried file-wise,
+      # ring by ring:
+      #   1. restore: actions cache -> host ./bc-restore
+      #   2. seed:    host ./bc-restore -> cache mount id=spack-buildcache
+      #               (busybox COPY into a layer, then cp into the mounted
+      #               cache dir; mounts are keyed by id in the builder state
+      #               shared by all builds of this job)
+      #   3. build:   the bundled spack Dockerfiles consume/push the same
+      #               mount (id pinned in the Dockerfiles)
+      #   4. export:  cache mount -> host ./bc-export (busybox cp out of the
+      #               mount, FROM scratch, buildx -o type=local)
+      #   5. save:    host ./bc-export -> actions cache (same key)
+      # Toolchain/CUDA variants skip every step guarded by the spack
+      # condition below.
+
+      - name: restore spack buildcache (actions cache -> host)
+        if: inputs.variant == 'spack_2025.2_x86_64'
+        uses: actions/cache/restore@v4
+        with:
+          path: ./bc-restore
+          # The bundled spack Dockerfile hash is the proxy key for the spack
+          # DAG hash (the deps yaml lives in the cp2k repo and cannot be
+          # hashed here); the prefix fallback adopts partial hits from older
+          # keys instead of discarding them.
+          key: spack-bc-x86_64-${{ hashFiles('dockerfiles/spack/**') }}
+          restore-keys: spack-bc-x86_64-
+
+      - name: seed BuildKit cache mount (host -> mount)
+        if: inputs.variant == 'spack_2025.2_x86_64'
+        run: |
+          cat > seed-spack-bc.Dockerfile <<'EOF'
+          FROM busybox
+          COPY bc-restore/ /seed/
+          RUN --mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked \
+              cp -a /seed/. /opt/spack-buildcache/
+          EOF
+          if [ -d bc-restore ] && [ -n "$(ls -A bc-restore 2>/dev/null)" ]; then
+            echo "seeding cache mount id=spack-buildcache from ./bc-restore"
+            DOCKER_BUILDKIT=1 docker build -f seed-spack-bc.Dockerfile -t spack-bc-seed .
+          else
+            echo "cache restore miss or empty; skip seed, cold build will populate the mount"
+          fi
+
       - name: forge2k build -m toolchain -v 2023.2 --cpu generic --cuda $CUDA
+        if: startsWith(inputs.variant, 'cuda_')
         timeout-minutes: 300
+        env:
+          # Map the dispatch choice to the forge2k --cuda value.
+          CUDA: ${{ inputs.variant == 'cuda_V100' && 'V100' || 'P100' }}
         run: |
           set -o pipefail
           ./target/debug/forge2k build -m toolchain -v 2023.2 --cpu generic --cuda "$CUDA" 2>&1 | tee build-log.txt
 
+      - name: forge2k build -m spack -v 2025.2 --cpu x86_64
+        if: inputs.variant == 'spack_2025.2_x86_64'
+        timeout-minutes: 340
+        run: |
+          set -o pipefail
+          ./target/debug/forge2k build -m spack -v 2025.2 --cpu x86_64 2>&1 | tee build-log.txt
+
       - name: smoke test docker run cp2k --version (no NVIDIA driver on runner; tolerated)
+        if: startsWith(inputs.variant, 'cuda_')
+        env:
+          CUDA: ${{ inputs.variant == 'cuda_V100' && 'V100' || 'P100' }}
         run: |
           echo "=== smoke begin: docker run --rm cp2k/cp2k:2023.2_mpich_generic_cuda_${CUDA}_psmp cp2k --version ==="
           docker run --rm cp2k/cp2k:2023.2_mpich_generic_cuda_${CUDA}_psmp cp2k --version || true
           echo "=== smoke end: runner has no NVIDIA driver, so this may fail without invalidating the job; the forge2k build step above is the acceptance gate ==="
+
+      - name: smoke test docker run cp2k --version (spack variant; hard gate)
+        if: inputs.variant == 'spack_2025.2_x86_64'
+        run: |
+          echo "=== smoke begin: docker run --rm cp2k/cp2k:2025.2_mpich_x86_64_psmp cp2k --version ==="
+          docker run --rm cp2k/cp2k:2025.2_mpich_x86_64_psmp cp2k --version
+          echo "=== smoke end: spack image has no GPU dependency, this step is a hard acceptance gate ==="
+
+      - name: export spack buildcache (mount -> host)
+        if: always() && inputs.variant == 'spack_2025.2_x86_64'
+        run: |
+          cat > export-spack-bc.Dockerfile <<'EOF'
+          FROM busybox AS bcread
+          RUN --mount=type=cache,target=/opt/spack-buildcache,id=spack-buildcache,sharing=locked \
+              mkdir -p /out && cp -a /opt/spack-buildcache/. /out/
+          FROM scratch
+          COPY --from=bcread /out/ /
+          EOF
+          start=$(date +%s)
+          DOCKER_BUILDKIT=1 docker buildx build -f export-spack-bc.Dockerfile -o type=local,dest=./bc-export .
+          {
+            echo "## spack buildcache export"
+            echo "- size: $(du -sh bc-export | cut -f1)"
+            echo "- export duration: $(( $(date +%s) - start ))s"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: save spack buildcache (host -> actions cache)
+        if: always() && inputs.variant == 'spack_2025.2_x86_64'
+        uses: actions/cache/save@v4
+        with:
+          path: ./bc-export
+          # Same key as restore; saving over an existing key only warns and
+          # does not fail (partial-payload overwrite is tolerated).
+          key: spack-bc-x86_64-${{ hashFiles('dockerfiles/spack/**') }}
 
       - name: upload build log
         if: always()
