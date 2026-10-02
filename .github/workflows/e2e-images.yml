@@ -62,8 +62,9 @@ jobs:
       # condition below.
 
       - name: restore spack buildcache (actions cache -> host)
+        id: restore1
         if: inputs.variant == 'spack_2025.2_x86_64'
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v4.3.0
         with:
           path: ./bc-restore
           # The bundled spack Dockerfile hash is the proxy key for the spack
@@ -73,6 +74,28 @@ jobs:
           key: spack-bc-x86_64-${{ hashFiles('dockerfiles/spack/**') }}
           restore-keys: spack-bc-x86_64-
 
+      # The cache service v2 index (actions/cache >= 4.2.0) can take minutes
+      # to propagate after a save, so a restore may report "Cache not found"
+      # while the save itself succeeded; waiting out the window and retrying
+      # the identical restore generally recovers it (observed 3x on this
+      # workflow: save ok, restore miss). Pin v4.3.0 on both ends to keep the
+      # save/restore service versions from drifting apart.
+      - name: absorb cache service v2 index propagation window
+        if: inputs.variant == 'spack_2025.2_x86_64' && steps.restore1.outputs.cache-hit != 'true'
+        run: sleep 240
+
+      - name: restore spack buildcache retry (actions cache -> host)
+        id: restore2
+        if: inputs.variant == 'spack_2025.2_x86_64' && steps.restore1.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4.3.0
+        with:
+          path: ./bc-restore
+          key: spack-bc-x86_64-${{ hashFiles('dockerfiles/spack/**') }}
+          restore-keys: spack-bc-x86_64-
+
+      # Deliberately keyed on the filesystem, not on restore outputs: either
+      # restore landing content in ./bc-restore (including restore-keys
+      # partial hits, which report cache-hit=false) must seed the mount.
       - name: seed BuildKit cache mount (host -> mount)
         if: inputs.variant == 'spack_2025.2_x86_64'
         run: |
@@ -142,7 +165,7 @@ jobs:
 
       - name: save spack buildcache (host -> actions cache)
         if: always() && inputs.variant == 'spack_2025.2_x86_64'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v4.3.0
         with:
           path: ./bc-export
           # Same key as restore; saving over an existing key only warns and
