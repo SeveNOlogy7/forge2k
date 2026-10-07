@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Added（第五期编译级缓存）
+
+- **Spack buildcache**：spack 系捆绑 Dockerfile 与模板把 24 个依赖包编译产物推入本地 buildcache mirror（独立 cache mount，`--unsigned` 无签名门槛）；同版本重建时依赖整包从 binary cache 安装——实测 Dockerfile 层失效后的二次构建 **7 分 06 秒**（冷轮 ~4h，107 处 relocating 命中、零源码编译）
+- **ccache 叠加**：buildcache miss 时新编译的 C/C++ 对象进入独立 ccache mount（`config:ccache:true` + `CCACHE_DIR`）
+- `E2E image build` workflow 新增 spack 变体（`spack_2025.2_x86_64`）：actions/cache 搬运 buildcache mirror（restore→seed→构建→export→save 五环），CI 冷轮 ~4h 全量成功 + 冒烟硬门通过
+
+### Fixed（第五期编译级缓存）
+
+- Wave 0 先行实证拦截的形态偏差：Spack 1.2.2 `config add` 无 `--scope`（直写 user scope）、`mirror add` 保留 `--scope`、命中词法为 `relocating`、warm-mirror no-op push 误报容错
+
+### Known limitation（第五期编译级缓存）
+
+- toolchain 系（v2023.2）不做编译级缓存：上游脚本写死编译器路径 + ccache 不支持 Fortran（上游设计）
+- GitHub Actions 侧 buildcache restore 间歇性 miss（cache service v2 索引问题，社区 #1710/#1694/#1735；已加 restore 重试 + v4.3.0 pin，仍偶发）——本机 cache mount 路径不受影响
+
 ### Added（第四期 CUDA 验证）
 
 - CUDA P100/V100 两变体在 GitHub Actions 完成独立全量构建验证（均成功）；新增 workflow_dispatch 手动触发的 `E2E image build` workflow 作为按需镜像验证工具

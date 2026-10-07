@@ -102,11 +102,18 @@ forge2k list
 | CP2K 源码 | `cp2k-src-<版本>`（如 `cp2k-src-2025.2`） | 同版本全部变体；重建时 `git fetch+reset+submodule update` 增量刷新 |
 | Spack 包源码 | `spack-src` | 全部 spack 变体（含 CUDA） |
 | toolchain tarballs | `toolchain-tarballs` | 全部 toolchain 变体（含 CUDA） |
+| **Spack 二进制包** | `spack-buildcache` | spack 系依赖编译产物（buildcache mirror，命中整包跳过） |
+| **ccache** | `spack-ccache` | spack 系 C/C++ 对象（buildcache miss 时的二级加速） |
+
+**编译级缓存（Spack buildcache）**：spack 系构建会把 24 个依赖包编译产物推入本地 buildcache mirror（`--unsigned`，无签名门槛）；同版本重建时依赖包从 binary cache 直接安装（实测 **107 处 `relocating` 命中、零源码编译**），配合下载段缓存，**Dockerfile 层失效后的二次构建实测 7 分 06 秒**（冷轮 ~4 小时）。CP2K 本体（Fortran 为主）不走 buildcache，其 cmake/编译段约 5 分钟仍会重跑。
+
+**toolchain 系（v2023.2）不支持编译级缓存**：上游 `install_cp2k_toolchain.sh` 为各依赖写死编译器绝对路径（自建 gcc 模式无注入点），且 ccache 不支持 Fortran——该系仅享受下载段缓存，这是上游设计而非本工具限制。
 
 要点：
 
 - cache mount 由 BuildKit 管理，**独立于镜像层缓存**：Dockerfile 变更导致的层失效不影响下载缓存。二次构建的提速幅度 = 下载段（实测：apt ~26 倍、CP2K 源码 clone 5-8 分钟 → fetch 秒级、toolchain tarball 直接跳过），编译段仍会重跑。
 - **`--no-cache` 注意**：实测（Docker Desktop 29.x）`--no-cache` 构建中 cache mount 视图为空、不命中既有缓存——如只想利用下载缓存，请通过修改 Dockerfile 制造层失效，而非 `--no-cache`。
+- 依赖 buildcache 的本机路径由 cache mount 持久化（独立 id 可单独 prune）；GitHub Actions 侧（`E2E image build` workflow 的 spack 变体）经 actions/cache 搬运同一 mirror，但受 cache 服务稳定性影响（实测 restore 间歇性 miss，重跑可解）。
 - toolchain 安装带**自愈重试**：下载中断留下的残缺 tar 包会被自动清理并重下（skip-if-exists 只信完好文件）。
 - 清空缓存：`docker builder prune --filter type=exec.cachemount`
 - 缓存磁盘占用约 5-6GB（估计值，以 `docker system df` 实测为准）。
