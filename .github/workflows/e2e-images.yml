@@ -21,6 +21,12 @@ jobs:
   e2e-image:
     name: e2e image (${{ inputs.variant }})
     runs-on: ubuntu-latest
+    # artifact transport (cross-run locate/download/prune) acts on Actions
+    # data: read for the artifact channel, write for the prune DELETE
+    # (phase-6 plan risk 10: short-lived GITHUB_TOKEN, workflow-scoped)
+    permissions:
+      contents: read
+      actions: write
     # Toolchain build on a 4-core runner is expected to take 1.5-3h: 330 min.
     # Spack variant: deps compile ~4.2h + cp2k ~19min + push/transport, so 350
     # min (step cap 340). Both stay under the 6h (360 min) GitHub hard cap.
@@ -48,22 +54,90 @@ jobs:
       # actions/cache and BuildKit cache mounts are disconnected (the mount
       # store dies with the runner), so the content is ferried file-wise,
       # ring by ring:
-      #   1. restore: actions cache -> host ./bc-restore
-      #   2. seed:    host ./bc-restore -> cache mount id=spack-buildcache
+      #   1. locate:  the artifact primary channel - a gh api ladder over
+      #               successful runs of this workflow finds the previous
+      #               run's spack-bc-x86_64-<dockerfiles/spack hash> artifact
+      #               (cross-run, actions:read) and it is downloaded to
+      #               ./bc-restore
+      #   2. restore: conditional fallback only, engaged when the artifact
+      #               channel missed: actions/cache (v4.3.0 pinned on both
+      #               ends) -> host ./bc-restore, with sleep 240 + identical
+      #               retry to wait out the cache service v2 index
+      #               propagation window; the whole cache chain is gated
+      #               off while an artifact hit stands (a stale or partial
+      #               cache hit must never mix into ./bc-restore behind the
+      #               artifact)
+      #   3. seed:    host ./bc-restore -> cache mount id=spack-buildcache
       #               (busybox COPY into a layer, then cp into the mounted
       #               cache dir; mounts are keyed by id in the builder state
       #               shared by all builds of this job)
-      #   3. build:   the bundled spack Dockerfiles consume/push the same
+      #   4. build:   the bundled spack Dockerfiles consume/push the same
       #               mount (id pinned in the Dockerfiles)
-      #   4. export:  cache mount -> host ./bc-export (busybox cp out of the
+      #   5. export:  cache mount -> host ./bc-export (busybox cp out of the
       #               mount, FROM scratch, buildx -o type=local)
-      #   5. save:    host ./bc-export -> actions cache (same key)
+      #   6. save:    host ./bc-export -> actions cache (same key) and ->
+      #               upload-artifact (the next run's primary channel);
+      #               after a successful upload, older same-prefix
+      #               artifacts from previous runs are pruned
+      # Why artifact-primary: the cache service v2 index is outside our
+      # control - commit 3ebc74d's sleep/retry mitigation did not cure it:
+      # saves kept succeeding while identical restores missed even hours
+      # later - so the artifact channel leads and the cache chain only
+      # walks on artifact miss; both miss -> cold build (unchanged).
       # Toolchain/CUDA variants skip every step guarded by the spack
       # condition below.
 
+      - name: locate prior spack buildcache artifact (gh api ladder, cross-run)
+        id: locate
+        if: inputs.variant == 'spack_2025.2_x86_64'
+        env:
+          # gh does not pick up the Actions token implicitly; inject both.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BC_NAME: spack-bc-x86_64-${{ hashFiles('dockerfiles/spack/**') }}
+        run: |
+          set -uo pipefail
+          hit=false
+          hit_run=""
+          attempt=1
+          while [ "${attempt}" -le 3 ]; do
+            echo "locate attempt ${attempt}/3: scanning successful runs for artifact ${BC_NAME}"
+            # newest-first candidate ladder over this workflow's successful runs
+            run_ids=$(gh run list --workflow e2e-images.yml --status success --limit 10 --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
+            for rid in ${run_ids}; do
+              found=$(gh api "repos/${GH_REPO}/actions/runs/${rid}/artifacts" \
+                --jq ".artifacts[] | select(.name == \"${BC_NAME}\") | .id" 2>/dev/null | head -n1 || true)
+              if [ -n "${found}" ]; then
+                hit=true
+                hit_run="${rid}"
+                echo "artifact hit: ${BC_NAME} in run ${rid} (artifact id ${found})"
+                break
+              fi
+            done
+            if [ "${hit}" = true ]; then break; fi
+            echo "not located yet (attempt ${attempt}/3); sleep 60"
+            sleep 60
+            attempt=$((attempt + 1))
+          done
+          echo "locate verdict: hit=${hit} run=${hit_run:-none}"
+          echo "hit=${hit}" >> "$GITHUB_OUTPUT"
+          echo "hit_run=${hit_run}" >> "$GITHUB_OUTPUT"
+
+      - name: download prior spack buildcache artifact (cross-run -> host)
+        if: steps.locate.outputs.hit == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          # Same landing path as the actions/cache restores below, so the
+          # seed step's emptiness check needs no change.
+          path: ./bc-restore
+          name: spack-bc-x86_64-${{ hashFiles('dockerfiles/spack/**') }}
+          # Cross-run download: pin the source run found by the locate step.
+          run-id: ${{ steps.locate.outputs.hit_run }}
+          github-token: ${{ github.token }}
+
       - name: restore spack buildcache (actions cache -> host)
         id: restore1
-        if: inputs.variant == 'spack_2025.2_x86_64'
+        if: steps.locate.outputs.hit != 'true' && inputs.variant == 'spack_2025.2_x86_64'
         uses: actions/cache/restore@v4.3.0
         with:
           path: ./bc-restore
@@ -81,12 +155,12 @@ jobs:
       # workflow: save ok, restore miss). Pin v4.3.0 on both ends to keep the
       # save/restore service versions from drifting apart.
       - name: absorb cache service v2 index propagation window
-        if: inputs.variant == 'spack_2025.2_x86_64' && steps.restore1.outputs.cache-hit != 'true'
+        if: steps.locate.outputs.hit != 'true' && inputs.variant == 'spack_2025.2_x86_64' && steps.restore1.outputs.cache-hit != 'true'
         run: sleep 240
 
       - name: restore spack buildcache retry (actions cache -> host)
         id: restore2
-        if: inputs.variant == 'spack_2025.2_x86_64' && steps.restore1.outputs.cache-hit != 'true'
+        if: steps.locate.outputs.hit != 'true' && inputs.variant == 'spack_2025.2_x86_64' && steps.restore1.outputs.cache-hit != 'true'
         uses: actions/cache/restore@v4.3.0
         with:
           path: ./bc-restore
@@ -146,6 +220,7 @@ jobs:
           echo "=== smoke end: spack image has no GPU dependency, this step is a hard acceptance gate ==="
 
       - name: export spack buildcache (mount -> host)
+        id: bcexport
         if: always() && inputs.variant == 'spack_2025.2_x86_64'
         run: |
           cat > export-spack-bc.Dockerfile <<'EOF'
@@ -171,6 +246,59 @@ jobs:
           # Same key as restore; saving over an existing key only warns and
           # does not fail (partial-payload overwrite is tolerated).
           key: spack-bc-x86_64-${{ hashFiles('dockerfiles/spack/**') }}
+
+      - name: upload spack buildcache artifact (host -> next run's primary channel)
+        id: bcupload
+        if: always() && inputs.variant == 'spack_2025.2_x86_64'
+        uses: actions/upload-artifact@v4
+        with:
+          # Same name semantics as the actions/cache key: the bundled spack
+          # Dockerfile hash stands in for the spack DAG hash.
+          name: spack-bc-x86_64-${{ hashFiles('dockerfiles/spack/**') }}
+          path: ./bc-export
+          # Two consecutive dispatches (incl. a failed retry) stay inside the
+          # window (phase-6 plan default 4).
+          retention-days: 2
+
+      - name: prune older same-prefix spack buildcache artifacts (previous runs)
+        if: always() && inputs.variant == 'spack_2025.2_x86_64' && steps.bcupload.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BC_PREFIX: spack-bc-x86_64-
+          CURRENT_RUN: ${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # v4 artifacts are per-run, so same-name entries from previous runs
+          # accumulate: list repo-wide same-prefix artifacts and delete those
+          # belonging to any other run. Reached only when this run's upload
+          # succeeded (r3 major gate on the upload outcome); a failed prune
+          # is logged, not fatal - the retention window is the backstop
+          # (phase-6 plan risk 2).
+          deleted=0
+          page=1
+          while :; do
+            batch=$(gh api "repos/${GH_REPO}/actions/artifacts?per_page=100&page=${page}" \
+              --jq ".artifacts[] | select(.name | startswith(\"${BC_PREFIX}\")) | select((.run_id | tostring) != \"${CURRENT_RUN}\") | \"\(.id) \(.name)\"" 2>/dev/null || true)
+            if [ -z "${batch}" ]; then break; fi
+            while read -r aid aname; do
+              if [ -z "${aid}" ]; then continue; fi
+              echo "prune old-run artifact: ${aname} (id ${aid})"
+              if gh api -X DELETE "repos/${GH_REPO}/actions/artifacts/${aid}" 2>/dev/null; then
+                deleted=$((deleted + 1))
+              else
+                echo "warning: prune of artifact ${aid} failed; retention window will expire it" >&2
+              fi
+            done <<EOF
+          ${batch}
+          EOF
+            page=$((page + 1))
+            if [ "${page}" -gt 10 ]; then
+              echo "warning: artifact listing exceeded 10 pages; prune sweep stopped" >&2
+              break
+            fi
+          done
+          echo "prune done: ${deleted} old-run artifact(s) removed"
 
       - name: upload build log
         if: always()
