@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarba
     /bin/bash -c -o pipefail \
     "for i in 1 2 3; do ./install_cp2k_toolchain.sh -j ${NUM_PROCS:-8} \
     --install-all \
-    --enable-cuda={{CUDA_FLAG}} {{CUDA_EXTRA}} --with-deepmd=no \
+    --enable-cuda={{CUDA_FLAG}} {{CUDA_EXTRA}} \
     --target-cpu={{CPU}} \
     --with-cusolvermp=no \
     --with-gcc=system \

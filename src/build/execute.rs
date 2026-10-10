@@ -440,9 +440,9 @@ fn check_prereq(name: &str) -> bool {
 }
 
 /// Probe-only tool list for Step 1: each entry is checked with
-/// `<tool> --version`. `mpicc` is probed because the toolchain runs with
-/// `--with-mpich=system`; it must NOT be pasted into an apt install batch
-/// (it is not an Ubuntu package name — see [`prereq_package_for`]).
+/// `<tool> --version`. Probed names are command names, not necessarily
+/// package names (`mpicc`, `bunzip2`), so before any apt call each name
+/// goes through [`prereq_package_for`].
 pub(crate) const NATIVE_REQUIRED_TOOLS: &[&str] = &[
     "gcc", "g++", "gfortran", "git", "make", "cmake", "wget", "bunzip2", "mpicc",
 ];
@@ -450,8 +450,10 @@ pub(crate) const NATIVE_REQUIRED_TOOLS: &[&str] = &[
 /// Fixed extra apt packages installed alongside whatever the missing-tool
 /// mapping resolves to. `mpich`/`libmpich-dev` mirror the bundled
 /// toolchain Dockerfile package line (generic Dockerfile lines 13-14) so a
-/// bare host gets the same MPI supply as the images; `libmpich-dev` is
-/// also the provider of the probed `mpicc`.
+/// bare host gets the same MPI supply as the images; `bzip2` (which
+/// provides the probed `bunzip2` command) and `libmpich-dev` (provider of
+/// `mpicc`) make the batch self-sufficient even when only some tools are
+/// missing.
 pub(crate) const NATIVE_APT_EXTRAS: &[&str] = &[
     "autoconf",
     "autogen",
@@ -467,15 +469,19 @@ pub(crate) const NATIVE_APT_EXTRAS: &[&str] = &[
     "zlib1g-dev",
     "mpich",
     "libmpich-dev",
+    "bzip2",
 ];
 
-/// Map a probe tool name to the Ubuntu package that provides it. Tools
-/// whose name already is the package name map to themselves; `mpicc` is
-/// provided by `libmpich-dev` and must never reach `apt-get install` as
-/// the raw tool name.
+/// Map a probe tool name to the Ubuntu package that provides it. Probed
+/// names are command names; every probed tool whose binary name differs
+/// from its package name needs an arm here (`mpicc` is provided by
+/// `libmpich-dev`, `bunzip2` by `bzip2` on jammy/noble). Names that
+/// already are package names map to themselves. A mapped result is what
+/// enters the apt batch — a raw probe name never does for mapped tools.
 pub(crate) fn prereq_package_for(tool: &str) -> &str {
     match tool {
         "mpicc" => "libmpich-dev",
+        "bunzip2" => "bzip2",
         other => other,
     }
 }
@@ -598,9 +604,9 @@ pub fn execute_native_build(
                 }
             }
         }
-        // Probe tool names are mapped to their provider packages first
-        // (e.g. 'mpicc' -> 'libmpich-dev'), so a raw tool name can never
-        // reach the apt batch.
+        // Every missing probe tool goes through the provider mapping
+        // (mpicc -> libmpich-dev, bunzip2 -> bzip2) before it reaches the
+        // apt batch; names without an arm must already be package names.
         let pkgs = apt_install_packages(&missing);
         let mut args: Vec<String> = vec![
             "install".into(),
