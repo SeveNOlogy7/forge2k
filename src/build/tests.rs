@@ -1139,9 +1139,15 @@ fn t_o21_cuda_options_spack_is_cpu_only() {
 
 #[test]
 fn t_o21_cuda_options_native_and_unknown_offer_empty_set() {
-    // native (and any unrecognized method) must map to an EMPTY set,
-    // which the GUI renders as a disabled control.
-    for method in ["native", "", "docker", "not-a-method"] {
+    // Flipped premise (Wave 4 whitelist expansion): native now offers the
+    // bundled CUDA set, in the matrix's declared order; only unrecognized
+    // methods still map to an EMPTY set, which the GUI renders disabled.
+    assert_eq!(
+        cuda_options_for_method("native"),
+        vec!["none", "P100", "V100"],
+        "T-O21: native must offer none + both bundled GPU variants"
+    );
+    for method in ["", "docker", "not-a-method"] {
         assert!(
             cuda_options_for_method(method).is_empty(),
             "T-O21: method {:?} must map to an empty CUDA option set",
@@ -1152,35 +1158,32 @@ fn t_o21_cuda_options_native_and_unknown_offer_empty_set() {
 
 #[test]
 fn t_o21_native_step0_rejects_gpu_options_consistent_with_empty_matrix() {
-    // Matrix self-consistency: the GUI offers nothing for native, so every
-    // GPU value toolchain DOES offer must be rejected by native Step 0 —
-    // which runs before any subprocess/filesystem side effect, so this is
-    // a pure unit-level check.
-    assert!(
-        cuda_options_for_method("native").is_empty(),
-        "T-O21: matrix premise — native offers no CUDA options"
-    );
-    for cuda in cuda_options_for_method("toolchain") {
-        if cuda == "none" {
-            continue; // the one cuda value the native path accepts
+    // Flipped premise (Wave 4 whitelist expansion): the native matrix now
+    // offers the bundled CUDA set, so every offered combination must be
+    // ACCEPTED by the pure Step 0 validator for a pinned release version
+    // (2023.2); master+CUDA (version-dimension rule) and non-whitelist
+    // combinations stay rejected. The validator has no subprocess or
+    // filesystem side effect, so this stays a pure unit-level check.
+    for cuda in cuda_options_for_method("native") {
+        for cpu in ["x86_64", "generic"] {
+            assert!(
+                super::execute::validate_native_config("2023.2", cpu, "mpich", "psmp", cuda)
+                    .is_ok(),
+                "T-O21: 2023.2 native combination cpu={:?}, cuda={:?} must pass Step 0",
+                cpu,
+                cuda
+            );
         }
-        let c = base_config("native", "master", "mpich", "x86_64", cuda, "psmp");
-        let (tx, rx) = mpsc::channel::<LogLine>();
-        let flag = Arc::new(Mutex::new(false));
-        let result = execute_native_build(&c, tx, flag);
-        drain_rx(rx);
-        let err = result.expect_err("T-O21: native + GPU cuda must be rejected by Step 0");
+    }
+    for (version, cpu, mpi, variant, cuda) in [
+        ("2023.2", "x86_64", "openmpi", "psmp", "none"),
+        ("master", "x86_64", "mpich", "psmp", "P100"),
+    ] {
+        let err = super::execute::validate_native_config(version, cpu, mpi, variant, cuda)
+            .expect_err("T-O21: non-whitelist native combination must be rejected");
         assert!(
-            err.to_string()
-                .contains("Unsupported native build configuration"),
+            err.contains("Unsupported native build configuration"),
             "T-O21: rejection must name the Step 0 validation, got: {}",
-            err
-        );
-        assert!(
-            err.to_string()
-                .contains(format!("cuda='{}'", cuda).as_str()),
-            "T-O21: rejection must echo the offending cuda value {:?}, got: {}",
-            cuda,
             err
         );
     }
