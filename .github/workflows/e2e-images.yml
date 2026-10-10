@@ -4,11 +4,14 @@ name: E2E image build
 # Local proxy networks are unreliable for large transfers (cp2k git clone,
 # nvidia/cuda base images); the runner network is not. Run this from the
 # Actions tab ("Run workflow") to validate the bundled Dockerfiles end to end.
+# native_* variants (phase-6 Wave 6) build CP2K directly on the runner instead:
+# no docker image is produced; acceptance = build exit code + exe existence
+# assertion + --version smoke (all hard gates).
 on:
   workflow_dispatch:
     inputs:
       variant:
-        description: Image variant to build (CUDA toolchain or spack)
+        description: Build variant (CUDA toolchain / spack docker image, or native runner build without docker)
         type: choice
         required: true
         default: cuda_P100
@@ -16,6 +19,8 @@ on:
           - cuda_P100
           - cuda_V100
           - spack_2025.2_x86_64
+          - native_2023.2_x86_64_none
+          - native_2023.2_generic_none
 
 jobs:
   e2e-image:
@@ -29,8 +34,10 @@ jobs:
       actions: write
     # Toolchain build on a 4-core runner is expected to take 1.5-3h: 330 min.
     # Spack variant: deps compile ~4.2h + cp2k ~19min + push/transport, so 350
-    # min (step cap 340). Both stay under the 6h (360 min) GitHub hard cap.
-    timeout-minutes: ${{ inputs.variant == 'spack_2025.2_x86_64' && 350 || 330 }}
+    # min (step cap 340). Native variant: toolchain install 1.5-3h + cp2k make
+    # 2-4h, same 350/340 arithmetic (phase-6 plan default 9). All stay under
+    # the 6h (360 min) GitHub hard cap.
+    timeout-minutes: ${{ (inputs.variant == 'spack_2025.2_x86_64' || startsWith(inputs.variant, 'native_')) && 350 || 330 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -40,7 +47,7 @@ jobs:
           VARIANT: ${{ inputs.variant }}
         run: |
           case "$VARIANT" in
-            cuda_P100|cuda_V100|spack_2025.2_x86_64) echo "variant ok: $VARIANT" ;;
+            cuda_P100|cuda_V100|spack_2025.2_x86_64|native_2023.2_x86_64_none|native_2023.2_generic_none) echo "variant ok: $VARIANT" ;;
             *) echo "unknown variant: $VARIANT" >&2; exit 1 ;;
           esac
 
@@ -299,6 +306,160 @@ jobs:
             fi
           done
           echo "prune done: ${deleted} old-run artifact(s) removed"
+
+      # --- native runner build (no docker) -------------------------------
+      # native_* variants (phase-6 Wave 6): build CP2K directly on the runner
+      # (the Wave-3 probe proved the full chain on this very image class).
+      # No docker image is produced - acceptance is the build exit code, the
+      # exe existence assertion and the --version smoke, all hard gates. Only
+      # the two cuda=none combinations are offered: a bare runner has no
+      # nvcc/CUDA toolkit, so CUDA native e2e stays backlog (plan default 2).
+      # mpich is deliberately NOT apt-installed by a workflow step: the
+      # product prereq path auto-installs it (Wave 4, plan default 11) and an
+      # explicit step here would mask the product behavior this e2e exists to
+      # prove. Every docker-side step above (transport ring, docker builds,
+      # docker smoke) is gated on the spack/cuda variant conditions and stays
+      # skipped for native runs.
+
+      - name: forge2k build -m native -v 2023.2 --cpu $CPU --cuda none
+        if: startsWith(inputs.variant, 'native_')
+        timeout-minutes: 340
+        env:
+          # Map the dispatch choice to the forge2k --cpu value (env-indirect
+          # style of the cuda mapping above; cuda stays none, so the make
+          # arch dir is always "local" for both native choices).
+          CPU: ${{ inputs.variant == 'native_2023.2_generic_none' && 'generic' || 'x86_64' }}
+        run: |
+          # pipefail: the forge2k exit code IS the acceptance gate - tee must
+          # not swallow it (same wiring as the toolchain/spack build steps).
+          set -o pipefail
+          echo "===== DF_CHECKPOINT:native-pre-build at $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+          df -h /
+          start=$(date +%s)
+          ./target/debug/forge2k build -m native -v 2023.2 --cpu "$CPU" --cuda none 2>&1 | tee native-build-log.txt
+          elapsed=$(( $(date +%s) - start ))
+          {
+            echo "===== DF_CHECKPOINT:native-post-build at $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+            df -h /
+            echo "NATIVE_BUILD_ELAPSED_SECONDS=${elapsed}"
+          } | tee -a native-build-log.txt
+
+      - name: assert native exe exists and is executable (hard gate)
+        if: startsWith(inputs.variant, 'native_')
+        run: |
+          # cuda=none -> the arch dir is always "local" (the arch name tracks
+          # cuda, not cpu; the bundled Dockerfiles and the native code
+          # agree). A missing or non-executable exe is a hard failure.
+          EXE=/opt/cp2k_build/cp2k/exe/local/cp2k.psmp
+          echo "===== EXE_ASSERT begin: test -x ${EXE} ====="
+          if test -x "${EXE}"; then
+            stat -c 'size=%s bytes mode=%A owner=%U:%G' "${EXE}"
+            file "${EXE}" || true
+            echo "EXE_ASSERT:PASS"
+          else
+            echo "EXE_ASSERT:FAIL (missing or not executable)" >&2
+            echo "--- diagnostics: build dir ---"
+            ls -ld /opt/cp2k_build /opt/cp2k_build/cp2k 2>&1 || true
+            ls -la /opt/cp2k_build/cp2k/exe/ 2>&1 || true
+            ls -la /opt/cp2k_build/cp2k/exe/local/ 2>&1 || true
+            echo "--- diagnostics: native-build-log.txt tail ---"
+            tail -n 40 native-build-log.txt 2>&1 || true
+            exit 1
+          fi
+
+      - name: smoke test native exe --version (direct, then toolchain setup fallback; hard gate)
+        if: startsWith(inputs.variant, 'native_')
+        run: |
+          # Hard acceptance gate (plan default 8): pass = a route prints
+          # "CP2K" AND exits 0; any other outcome fails the job. Wiring
+          # rules (fixing the Wave-3 probe ladder defects): defined absolute
+          # paths only - no bare relative paths and no undefined variables
+          # (set -u for this script's own wiring); explicit begin/end
+          # markers and rc per route; the fallback sources the toolchain
+          # install/setup script in THIS shell (it exports PATH and
+          # LD_LIBRARY_PATH for the toolchain-prefix shared libs the exe
+          # links against) and then retries the same absolute path. timeout
+          # 180 guards a pathological hang: a killed run reports rc 124 and
+          # can never pass the rc-0 requirement, so it reads as an honest
+          # FAIL instead of a hang eating the job budget.
+          set -u
+          set +e
+          EXE=/opt/cp2k_build/cp2k/exe/local/cp2k.psmp
+          SETUP=/opt/cp2k_build/cp2k/tools/toolchain/install/setup
+          test -x "${EXE}" || { echo "SMOKE_VERDICT:FAIL exe missing or not executable: ${EXE}" >&2; exit 1; }
+          # The exe links the runner's system MPICH, whose UCX transport dials
+          # InfiniBand and aborts on hosted runners ("ibv_create_srq Operation
+          # not supported", probe4 run 38039736230); that abort is what
+          # misreads as rc 15 in the fallback route. Pin UCX to loopback/tcp
+          # for the version probe; a no-op where UCX is absent.
+          export UCX_TLS=tcp,self,sm
+
+          echo "===== SMOKE route=direct begin: ${EXE} --version ====="
+          direct_out=$(timeout 180 "${EXE}" --version 2>&1)
+          direct_rc=$?
+          printf '%s\n' "${direct_out}"
+          echo "===== SMOKE route=direct end rc=${direct_rc} ====="
+          if [ "${direct_rc}" -eq 0 ] && printf '%s\n' "${direct_out}" | grep -q "CP2K"; then
+            echo "SMOKE_VERDICT:PASS route=direct rc=0"
+            exit 0
+          fi
+
+          echo "===== SMOKE route=setup-fallback begin: source ${SETUP}; retry ${EXE} --version ====="
+          if [ ! -f "${SETUP}" ]; then
+            echo "SMOKE_VERDICT:FAIL setup script missing: ${SETUP} (direct rc=${direct_rc})" >&2
+            exit 1
+          fi
+          # Source the toolchain env in THIS shell so the retry below
+          # inherits the exported PATH/LD_LIBRARY_PATH; -u is relaxed around
+          # the third-party script (its own variable discipline is not ours
+          # to guarantee), then restored for the rest of the ladder.
+          set +u
+          source "${SETUP}"
+          source_rc=$?
+          set -u
+          # Re-assert explicit rc control: a sourced third-party script may
+          # have enabled errexit in this shell, which would abort the ladder
+          # before the verdict markers print.
+          set +e
+          echo "===== SMOKE source ${SETUP} rc=${source_rc} ====="
+          if [ "${source_rc}" -ne 0 ]; then
+            echo "SMOKE_VERDICT:FAIL source rc=${source_rc} (direct rc=${direct_rc})" >&2
+            exit 1
+          fi
+          fallback_out=$(timeout 180 "${EXE}" --version 2>&1)
+          fallback_rc=$?
+          printf '%s\n' "${fallback_out}"
+          echo "===== SMOKE route=setup-fallback end rc=${fallback_rc} ====="
+          if [ "${fallback_rc}" -eq 0 ] && printf '%s\n' "${fallback_out}" | grep -q "CP2K"; then
+            echo "SMOKE_VERDICT:PASS route=setup-fallback rc=0"
+            exit 0
+          fi
+
+          echo "SMOKE_VERDICT:FAIL both routes (direct rc=${direct_rc}, setup-fallback rc=${fallback_rc})" >&2
+          exit 1
+
+      - name: native evidence transcript (df + log tail; tolerant, never fails)
+        if: always() && startsWith(inputs.variant, 'native_')
+        run: |
+          # Tolerant reporting only (plan risk 4/5): on a failed or aborted
+          # build this still records the disk state and the log tail so the
+          # evidence reading does not depend on the build step surviving.
+          echo "===== DF_CHECKPOINT:native-post-job at $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+          df -h /
+          ls -l /opt/cp2k_build/cp2k/exe/local/ 2>&1 || true
+          echo "===== native-build-log.txt tail ====="
+          tail -n 20 native-build-log.txt 2>&1 || true
+
+      - name: upload native build log
+        if: always() && startsWith(inputs.variant, 'native_')
+        uses: actions/upload-artifact@v4
+        with:
+          # Per-variant name (same convention as the build-log upload
+          # below); retention matches the transport window (phase-6 plan
+          # default 4).
+          name: native-build-log-${{ inputs.variant }}
+          path: native-build-log.txt
+          retention-days: 2
 
       - name: upload build log
         if: always()
