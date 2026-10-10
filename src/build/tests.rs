@@ -1112,6 +1112,432 @@ fn t14_execute_native_build_rejects_unsupported_combination() {
 // level (documented in the results JSON).
 
 // --------------------------------------------------------
+// Wave 5 (t14): native 6-combination whitelist matrix,
+// toolchain-args flag surface, prereq package mapping
+// --------------------------------------------------------
+//
+// These tests pin the Wave 4 parameterization (validate_native_config,
+// native_toolchain_args) and the t9 prereq fix (probe list + apt package
+// mapping). Expected values are independent literals — never re-derived
+// from the production code under test — and the Dockerfile cross-checks
+// keep them anchored to the bundled reference files. The red drill in the
+// result JSON proves that reverting a pinned production arm turns the
+// corresponding assertion red.
+
+#[test]
+fn t14_native_whitelist_accepts_six_combinations_and_rejects_the_rest() {
+    // Exactly cpu ∈ {generic, x86_64} × cuda ∈ {none, P100, V100} pass,
+    // with mpi='mpich' and variant='psmp' locked. The version dimension is
+    // pinned to a release (2023.2), so a pass here can never come from the
+    // master+cuda exception path.
+    let mut accepted = 0usize;
+    for cpu in ["generic", "x86_64"] {
+        for cuda in ["none", "P100", "V100"] {
+            match super::execute::validate_native_config("2023.2", cpu, "mpich", "psmp", cuda) {
+                Ok(()) => accepted += 1,
+                Err(e) => panic!(
+                    "T-014: whitelisted 2023.2 combination cpu={:?} cuda={:?} must pass Step 0, got: {}",
+                    cpu, cuda, e
+                ),
+            }
+        }
+    }
+    assert_eq!(
+        accepted, 6,
+        "T-014: exactly the 6 whitelisted combinations must pass"
+    );
+    assert!(
+        super::execute::validate_native_config("master", "x86_64", "mpich", "psmp", "none").is_ok(),
+        "T-014: master + cuda='none' must stay supported (cmake path)"
+    );
+
+    // One representative per rejection axis; each must Err AND list the
+    // full supported set (not merely echo the offending values).
+    let rejected: [(&str, &str, &str, &str, &str); 5] = [
+        ("2023.2", "x86_64", "openmpi", "psmp", "none"), // mpi axis
+        ("2023.2", "x86_64", "mpich", "ssmp", "none"),   // variant axis
+        ("2023.2", "x86_64", "mpich", "pdbg", "none"),   // variant axis
+        ("2023.2", "cascadelake", "mpich", "psmp", "none"), // cpu axis
+        ("master", "x86_64", "mpich", "psmp", "P100"),   // version x cuda axis
+    ];
+    for (version, cpu, mpi, variant, cuda) in rejected {
+        let err = super::execute::validate_native_config(version, cpu, mpi, variant, cuda)
+            .expect_err("T-014: non-whitelist combination must be rejected");
+        assert!(
+            err.contains("Unsupported native build configuration"),
+            "T-014: rejection must name the Step 0 validation, got: {}",
+            err
+        );
+        for needle in [
+            "cpu in {'generic', 'x86_64'}",
+            "mpi='mpich'",
+            "variant='psmp'",
+            "cuda in {'none', 'P100', 'V100'}",
+        ] {
+            assert!(
+                err.contains(needle),
+                "T-014: rejection message must list supported-set member {:?}, got: {}",
+                needle,
+                err
+            );
+        }
+        for echo in [
+            format!("version='{}'", version),
+            format!("cpu='{}'", cpu),
+            format!("mpi='{}'", mpi),
+            format!("variant='{}'", variant),
+            format!("cuda='{}'", cuda),
+        ] {
+            assert!(
+                err.contains(&echo),
+                "T-014: rejection message must echo offending value {:?}, got: {}",
+                echo,
+                err
+            );
+        }
+    }
+}
+
+#[test]
+fn t14_native_toolchain_args_match_bundled_dockerfile_flag_surface() {
+    // Exact expected argv per whitelisted cpu x cuda combination. These
+    // literals ARE the bundled-Dockerfile flag surface
+    // (dockerfiles/toolchain/2023.2_mpich_generic[_cuda_<GPU>]_psmp.Dockerfile
+    // lines 23-33), written out independently of the implementation.
+    let cases: [(&str, &str, &[&str]); 6] = [
+        (
+            "generic",
+            "none",
+            &[
+                "-j",
+                "8",
+                "--install-all",
+                "--enable-cuda=no",
+                "--target-cpu=generic",
+                "--with-cusolvermp=no",
+                "--with-gcc=system",
+                "--with-mpich=system",
+            ],
+        ),
+        (
+            "x86_64",
+            "none",
+            &[
+                "-j",
+                "8",
+                "--install-all",
+                "--enable-cuda=no",
+                "--target-cpu=x86_64",
+                "--with-cusolvermp=no",
+                "--with-gcc=system",
+                "--with-mpich=system",
+            ],
+        ),
+        (
+            "generic",
+            "P100",
+            &[
+                "-j",
+                "8",
+                "--install-all",
+                "--enable-cuda=yes",
+                "--gpu-ver=P100",
+                "--with-libtorch=no",
+                "--target-cpu=generic",
+                "--with-cusolvermp=no",
+                "--with-gcc=system",
+                "--with-mpich=system",
+            ],
+        ),
+        (
+            "x86_64",
+            "P100",
+            &[
+                "-j",
+                "8",
+                "--install-all",
+                "--enable-cuda=yes",
+                "--gpu-ver=P100",
+                "--with-libtorch=no",
+                "--target-cpu=x86_64",
+                "--with-cusolvermp=no",
+                "--with-gcc=system",
+                "--with-mpich=system",
+            ],
+        ),
+        (
+            "generic",
+            "V100",
+            &[
+                "-j",
+                "8",
+                "--install-all",
+                "--enable-cuda=yes",
+                "--gpu-ver=V100",
+                "--with-libtorch=no",
+                "--target-cpu=generic",
+                "--with-cusolvermp=no",
+                "--with-gcc=system",
+                "--with-mpich=system",
+            ],
+        ),
+        (
+            "x86_64",
+            "V100",
+            &[
+                "-j",
+                "8",
+                "--install-all",
+                "--enable-cuda=yes",
+                "--gpu-ver=V100",
+                "--with-libtorch=no",
+                "--target-cpu=x86_64",
+                "--with-cusolvermp=no",
+                "--with-gcc=system",
+                "--with-mpich=system",
+            ],
+        ),
+    ];
+    for (cpu, cuda, want) in cases {
+        let c = base_config("native", "2023.2", "mpich", cpu, cuda, "psmp");
+        let got = super::execute::native_toolchain_args(&c);
+        let want: Vec<String> = want.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            got, want,
+            "T-014: native toolchain args for cpu={:?} cuda={:?} must match the bundled Dockerfile flag surface exactly",
+            cpu, cuda
+        );
+
+        if cuda == "none" {
+            assert!(
+                got.iter().any(|a| a == "--enable-cuda=no"),
+                "T-014: cuda=none combination must pass --enable-cuda=no, got: {:?}",
+                got
+            );
+            assert!(
+                !got.iter().any(|a| a.starts_with("--gpu-ver=")),
+                "T-014: cuda=none combination must not pass --gpu-ver, got: {:?}",
+                got
+            );
+            assert!(
+                !got.iter().any(|a| a == "--with-libtorch=no"),
+                "T-014: cuda=none combination must not pass --with-libtorch=no, got: {:?}",
+                got
+            );
+        } else {
+            assert!(
+                got.iter().any(|a| a == "--enable-cuda=yes"),
+                "T-014: cuda={:?} combination must pass --enable-cuda=yes, got: {:?}",
+                cuda,
+                got
+            );
+            let gpu_flag = format!("--gpu-ver={}", cuda);
+            assert!(
+                got.iter().any(|a| a == &gpu_flag),
+                "T-014: cuda={:?} combination must pass {:?}, got: {:?}",
+                cuda,
+                gpu_flag,
+                got
+            );
+            assert!(
+                got.iter().any(|a| a == "--with-libtorch=no"),
+                "T-014: cuda={:?} combination must pass --with-libtorch=no (bundled CUDA Dockerfile), got: {:?}",
+                cuda,
+                got
+            );
+        }
+        // Regression guard for the runner-probed 2023.2 rejection: the
+        // script answers --with-deepmd with "Unknown flag", so NO
+        // combination may ever carry it.
+        assert!(
+            !got.iter().any(|a| a.contains("deepmd")),
+            "T-014: no native combination may pass --with-deepmd (rejected by the 2023.2 script), got: {:?}",
+            got
+        );
+    }
+
+    // Cross-check the literal tables above against the bundled files: the
+    // flag spellings and grouping must be the ones the images actually use.
+    const GENERIC_DF: &str = "dockerfiles/toolchain/2023.2_mpich_generic_psmp.Dockerfile";
+    const P100_DF: &str = "dockerfiles/toolchain/2023.2_mpich_generic_cuda_P100_psmp.Dockerfile";
+    const V100_DF: &str = "dockerfiles/toolchain/2023.2_mpich_generic_cuda_V100_psmp.Dockerfile";
+    let generic = bundled_dockerfile(GENERIC_DF);
+    for flag in [
+        "--install-all",
+        "--enable-cuda=no",
+        "--target-cpu=generic",
+        "--with-cusolvermp=no",
+        "--with-gcc=system",
+        "--with-mpich=system",
+    ] {
+        assert!(
+            generic.contains(flag),
+            "T-014: bundled {} must carry {:?} (native args reference)",
+            GENERIC_DF,
+            flag
+        );
+    }
+    assert!(
+        !generic.contains("--gpu-ver=") && !generic.contains("--with-libtorch=no"),
+        "T-014: bundled {} (cuda=none) must not carry CUDA-only flags",
+        GENERIC_DF
+    );
+    for (rel, gpu) in [(P100_DF, "P100"), (V100_DF, "V100")] {
+        let df = bundled_dockerfile(rel);
+        let cuda_run = format!("--enable-cuda=yes --gpu-ver={} --with-libtorch=no", gpu);
+        assert!(
+            df.contains(&cuda_run),
+            "T-014: bundled {} must carry the CUDA flag run {:?} (native args reference)",
+            rel,
+            cuda_run
+        );
+        for flag in [
+            "--install-all",
+            "--target-cpu=generic",
+            "--with-cusolvermp=no",
+            "--with-gcc=system",
+            "--with-mpich=system",
+        ] {
+            assert!(
+                df.contains(flag),
+                "T-014: bundled {} must carry {:?} (native args reference)",
+                rel,
+                flag
+            );
+        }
+    }
+    for rel in [GENERIC_DF, P100_DF, V100_DF] {
+        assert!(
+            !bundled_dockerfile(rel).contains("deepmd"),
+            "T-014: bundled {} must not carry the rejected --with-deepmd flag",
+            rel
+        );
+    }
+}
+
+#[test]
+fn t14_native_prereq_lists_and_package_mapping_are_pinned() {
+    use super::execute::{
+        apt_install_packages, prereq_package_for, NATIVE_APT_EXTRAS, NATIVE_REQUIRED_TOOLS,
+    };
+
+    // t9 mpich supply fix: mpicc is probed, mpich/libmpich-dev/bzip2 are
+    // installed from apt (package names identical to the bundled
+    // Dockerfile package line).
+    assert!(
+        NATIVE_REQUIRED_TOOLS.contains(&"mpicc"),
+        "T-014: probe list must include mpicc (mpich prereq fix), got: {:?}",
+        NATIVE_REQUIRED_TOOLS
+    );
+    for pkg in ["mpich", "libmpich-dev", "bzip2"] {
+        assert!(
+            NATIVE_APT_EXTRAS.contains(&pkg),
+            "T-014: apt extras must include {:?} (mpich supply / bunzip2 provider), got: {:?}",
+            pkg,
+            NATIVE_APT_EXTRAS
+        );
+    }
+
+    // Table-driven mapping coverage (gate-review addition): every probed
+    // tool name maps to the real Ubuntu package that provides it, and the
+    // table covers the probe list EXACTLY — a future tool added to
+    // NATIVE_REQUIRED_TOOLS without a mapping row fails here instead of
+    // silently regressing the apt batch.
+    const EXPECTED_PACKAGE: &[(&str, &str)] = &[
+        ("gcc", "gcc"),
+        ("g++", "g++"),
+        ("gfortran", "gfortran"),
+        ("git", "git"),
+        ("make", "make"),
+        ("cmake", "cmake"),
+        ("wget", "wget"),
+        ("bunzip2", "bzip2"),
+        ("mpicc", "libmpich-dev"),
+    ];
+    for &(tool, pkg) in EXPECTED_PACKAGE {
+        assert!(
+            NATIVE_REQUIRED_TOOLS.contains(&tool),
+            "T-014: mapping-table row {:?} is not in the probe list — stale test row",
+            tool
+        );
+        assert_eq!(
+            prereq_package_for(tool),
+            pkg,
+            "T-014: probe {:?} must map to its provider package {:?}",
+            tool,
+            pkg
+        );
+    }
+    for &tool in NATIVE_REQUIRED_TOOLS {
+        assert!(
+            EXPECTED_PACKAGE.iter().any(|&(t, _)| t == tool),
+            "T-014: probe tool {:?} has no row in the expected mapping table — map it and register it here",
+            tool
+        );
+        let pkg = prereq_package_for(tool);
+        assert!(
+            !pkg.is_empty() && !pkg.contains('/') && !pkg.contains(char::is_whitespace),
+            "T-014: mapped package for {:?} must be a bare package name, got {:?}",
+            tool,
+            pkg
+        );
+    }
+
+    // apt batch: probe names never appear, providers do, and every extra
+    // survives dedup exactly once (bzip2 arrives twice: bunzip2 mapping +
+    // extras row).
+    let pkgs = apt_install_packages(NATIVE_REQUIRED_TOOLS);
+    assert!(
+        !pkgs.iter().any(|p| p.as_str() == "mpicc"),
+        "T-014: mpicc is a probe name, never an apt package: {:?}",
+        pkgs
+    );
+    assert!(
+        !pkgs.iter().any(|p| p.as_str() == "bunzip2"),
+        "T-014: bunzip2 is a probe name, never an apt package: {:?}",
+        pkgs
+    );
+    for &tool in NATIVE_REQUIRED_TOOLS {
+        let pkg = prereq_package_for(tool);
+        assert!(
+            pkgs.iter().any(|p| p.as_str() == pkg),
+            "T-014: provider {:?} of probe {:?} must appear in the apt batch",
+            pkg,
+            tool
+        );
+    }
+    for &extra in NATIVE_APT_EXTRAS {
+        let n = pkgs.iter().filter(|p| p.as_str() == extra).count();
+        assert_eq!(
+            n, 1,
+            "T-014: extra {:?} must appear exactly once after dedup, got {}",
+            extra, n
+        );
+    }
+    let bz = pkgs.iter().filter(|p| p.as_str() == "bzip2").count();
+    assert_eq!(
+        bz, 1,
+        "T-014: bzip2 (bunzip2 mapping + extras) must be deduplicated to exactly one entry, got {}",
+        bz
+    );
+
+    // Dedup also holds when the same tool is reported missing twice.
+    let dup = apt_install_packages(&["bunzip2", "bunzip2", "mpicc", "mpicc"]);
+    assert_eq!(
+        dup.iter().filter(|p| p.as_str() == "bzip2").count(),
+        1,
+        "T-014: repeated bunzip2 misses must still yield one bzip2 entry: {:?}",
+        dup
+    );
+    assert_eq!(
+        dup.iter().filter(|p| p.as_str() == "libmpich-dev").count(),
+        1,
+        "T-014: repeated mpicc misses must still yield one libmpich-dev entry: {:?}",
+        dup
+    );
+}
+
+// --------------------------------------------------------
 // Wave 5 (T-O21): method → CUDA option support matrix
 // --------------------------------------------------------
 
