@@ -279,7 +279,7 @@ jobs:
           page=1
           while :; do
             batch=$(gh api "repos/${GH_REPO}/actions/artifacts?per_page=100&page=${page}" \
-              --jq ".artifacts[] | select(.name | startswith(\"${BC_PREFIX}\")) | select((.run_id | tostring) != \"${CURRENT_RUN}\") | \"\(.id) \(.name)\"" 2>/dev/null || true)
+              --jq ".artifacts[] | select(.name | startswith(\"${BC_PREFIX}\")) | select((.workflow_run.id | tostring) != \"${CURRENT_RUN}\") | \"\(.id) \(.name)\"" 2>/dev/null || true)
             if [ -z "${batch}" ]; then break; fi
             while read -r aid aname; do
               if [ -z "${aid}" ]; then continue; fi
