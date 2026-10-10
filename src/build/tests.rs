@@ -1227,7 +1227,7 @@ fn t14_native_toolchain_args_match_bundled_dockerfile_flag_surface() {
                 "8",
                 "--install-all",
                 "--enable-cuda=no",
-                "--target-cpu=x86_64",
+                "--target-cpu=generic",
                 "--with-cusolvermp=no",
                 "--with-gcc=system",
                 "--with-mpich=system",
@@ -1259,7 +1259,7 @@ fn t14_native_toolchain_args_match_bundled_dockerfile_flag_surface() {
                 "--enable-cuda=yes",
                 "--gpu-ver=P100",
                 "--with-libtorch=no",
-                "--target-cpu=x86_64",
+                "--target-cpu=generic",
                 "--with-cusolvermp=no",
                 "--with-gcc=system",
                 "--with-mpich=system",
@@ -1291,7 +1291,9 @@ fn t14_native_toolchain_args_match_bundled_dockerfile_flag_surface() {
                 "--enable-cuda=yes",
                 "--gpu-ver=V100",
                 "--with-libtorch=no",
-                "--target-cpu=x86_64",
+                // x86_64 is the CLI baseline name; the toolchain script
+                // vocabulary only knows `generic` (probe 38061298248).
+                "--target-cpu=generic",
                 "--with-cusolvermp=no",
                 "--with-gcc=system",
                 "--with-mpich=system",

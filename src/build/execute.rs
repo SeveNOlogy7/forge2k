@@ -95,6 +95,12 @@ pub fn validate_native_config(
 /// `--with-deepmd=no` is deliberately absent: the 2023.2 toolchain script
 /// rejects it with "Unknown flag" (runner probe run 38057079002), and the
 /// bundled Dockerfiles never pass it either.
+///
+/// `x86_64` is translated to `generic` for the script: the script's CPU
+/// vocabulary is generic/cascadelake/... and both OpenBLAS getarch
+/// ("TARGET not supported") and gfortran ("bad value for -mtune=") reject
+/// the literal `x86_64` (runner probe run 38061298248); the bundled
+/// Dockerfiles pass --target-cpu=generic for the same baseline target.
 pub(crate) fn native_toolchain_args(config: &BuildConfig) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-j".to_string(),
@@ -108,7 +114,12 @@ pub(crate) fn native_toolchain_args(config: &BuildConfig) -> Vec<String> {
         args.push(format!("--gpu-ver={}", config.cuda));
         args.push("--with-libtorch=no".to_string());
     }
-    args.push(format!("--target-cpu={}", config.cpu));
+    let script_cpu = if config.cpu == "x86_64" {
+        "generic"
+    } else {
+        config.cpu.as_str()
+    };
+    args.push(format!("--target-cpu={}", script_cpu));
     args.push("--with-cusolvermp=no".to_string());
     args.push("--with-gcc=system".to_string());
     args.push("--with-mpich=system".to_string());
@@ -720,10 +731,20 @@ pub fn execute_native_build(
     }
 
     let tc_script = toolchain_dir.join("install_cp2k_toolchain.sh");
-    let mut tc_args: Vec<String> = vec![tc_script.to_string_lossy().into_owned()];
+    // UCX_TLS: ELPA's configure probes MPI threading by running a short MPI
+    // program; on hosts where the system MPICH ships UCX, that probe dials
+    // InfiniBand and aborts ("ibv_create_srq() Operation not supported",
+    // runner probe run 38061298248), which ELPA misreads as "insufficient
+    // threading level" and fails the build. Pin UCX to sockets so the probe
+    // stays local; a no-op where UCX is absent.
+    let mut tc_args: Vec<String> = vec![
+        "UCX_TLS=tcp,self,sm".to_string(),
+        "bash".to_string(),
+        tc_script.to_string_lossy().into_owned(),
+    ];
     tc_args.extend(native_toolchain_args(config));
     match run_cmd_logged(
-        "bash",
+        "env",
         &tc_args,
         Some(toolchain_dir.as_path()),
         &log_tx,
