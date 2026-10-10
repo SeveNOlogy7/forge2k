@@ -52,6 +52,7 @@ RUN cat /opt/cp2k/tools/spack/{{DEPS_YAML}} && \
 # Plain `spack config add` (no --scope) writes /root/.spack/config.yaml;
 # that form is version-portable (Spack 1.2.2 dropped --scope for config add; mirror add retains it).
 RUN spack config add config:ccache:true && \
+    spack config add "concretizer:targets:granularity:generic" && \
     spack mirror add --scope site --unsigned spack-bc file:///opt/spack-buildcache
 ENV CCACHE_DIR=/opt/spack-ccache
 

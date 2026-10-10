@@ -76,6 +76,7 @@ RUN spack external find --all --not-buildable
 # NOTE: Spack 1.2.2 `spack config add` has no --scope flag; the plain form
 # writes /root/.spack/config.yaml (user scope, Wave 0 probe-verified).
 RUN spack config add config:ccache:true && \
+    spack config add "concretizer:targets:granularity:generic" && \
     spack mirror add --scope site --unsigned spack-bc file:///opt/spack-buildcache
 ENV CCACHE_DIR=/opt/spack-ccache
 
