@@ -73,7 +73,7 @@ forge2k list
 
 - **spack**（默认）：基于 `ubuntu:24.04`，两段式构建——Spack 环境解析 CP2K 依赖后安装，运行时镜像只保留安装产物。支持 v2025.2+ 与 master。
 - **toolchain**：基于 `ubuntu:22.04`（CUDA 变体基于 `nvidia/cuda:12.2.0-devel`），运行 CP2K 官方 `install_cp2k_toolchain.sh` 后 `make`。支持 v2023.2 与 CUDA（P100/V100）。
-- **native**：不经 Docker，直接在主机上克隆 CP2K 源码、跑 toolchain 安装、CMake/make 构建。当前仅支持默认组合（x86_64 / system mpich / psmp / cuda none），其他组合会显式报错。
+- **native**：不经 Docker，直接在主机上克隆 CP2K 源码、跑 toolchain 安装、CMake/make 构建。支持 6 种组合：CPU（generic / x86_64）× CUDA（none / P100 / V100），MPI 锁定 system mpich、variant 锁定 psmp（与其他变体矩阵对齐）；master 分支 + CUDA 的组合显式拒绝（cmake 路径不支持）。MPI 缺失时自动 apt 补装（mpich/libmpich-dev）。已在 GitHub Actions ubuntu runner 上验证 x86_64/generic 两组合全链路构建 + 产物 `--version` 冒烟。
 
 ## Dockerfile 捆绑清单
 
@@ -153,7 +153,8 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 时于 ubuntu / windows 双平
 ## 已知限制
 
 - Windows release 构建是 GUI 子系统，CLI 无 stdout（退出码正常）；debug 构建不受影响
-- native 构建仅支持默认参数组合，GUI 中选择不支持组合会显式报错
+- native 构建的 MPI 锁定 system mpich、variant 锁定 psmp（master 分支 + CUDA 组合显式拒绝）；已在 GitHub Actions ubuntu runner 验证 x86_64/generic 两组合全链路（含 `--version` 冒烟），CUDA 两组合构建面支持但未经镜像级验证（runner 无 NVIDIA 驱动/CUDA toolkit，backlog）
 - CUDA P100/V100 变体已在 GitHub Actions 完成全量构建验证（2026-09-29，均成功）；容器内 `cp2k --version` 需 NVIDIA 驱动（无 GPU 主机因缺 libcuda.so.1 无法运行，属环境边界非镜像缺陷）
 - 2026.1 / master 走 synthesized 合成路径（见上）
 - `mirror --restart` 在 Windows 上经 `cmd /C start` 重启 Docker Desktop，未做破坏性端到端验证
+- GitHub Actions 侧的 buildcache restore 偶发 miss（GitHub cache 服务 v2 索引问题，社区 #1710/#1694/#1735；已加 restore 重试 + artifact 跨 run 主通道缓解）——本机 cache mount 路径不受影响

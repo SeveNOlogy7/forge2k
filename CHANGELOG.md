@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### Added（第六期 CI 根治 + native 参数化）
+
+- **buildcache CI 侧根治**：搬运介质从 actions/cache（v2 索引间歇 miss）换为 **artifact 跨 run 主通道**（download-artifact run-id + actions:read；cache 链降级为 artifact miss 时的条件 fallback）——CI 复用轮实测 **107/107 依赖包从 binary cache 命中安装、零源码编译**，locate 跨 run 定位 `hit=true`
+- **native 全参数化**：白名单从单组合扩展为 6 组合（CPU generic/x86_64 × CUDA none/P100/V100，mpich/psmp 锁定，master+CUDA 显式拒绝）；mpich prereq 产品级自动补装（mpicc 探测 + mpich/libmpich-dev/bzip2 包名映射 + sudo 升级）
+- `E2E image build` workflow 新增 native 两变体（`native_2023.2_x86_64_none` / `native_2023.2_generic_none`）：CI 上全链路构建 + exe 断言 + UCX-pinned `--version` 冒烟硬门
+- native CI e2e 实证：x86_64_none 与 generic_none 两组合全链路构建 + `--version` 冒烟均通过
+
+### Fixed（第六期）
+
+- **prune 自删 bug**：清理步 jq 用 `.run_id`（repo-wide API 无此字段，恒 null → 恒真）导致每个 run 结束时删掉自己刚上传的 buildcache artifact——改为 `.workflow_run.id`
+- **微架构哈希漂移**：GitHub runner 池混合 icelake/zen2 等 CPU，host-adaptive target 使 DAG 哈希跨 runner 不稳定——spack 系钉 `concretizer:targets:granularity:generic`（产物为 baseline x86_64，可移植性增强；代价为放弃 host 自适应优化，见 README）
+- **native 路径遗留缺陷**（runner probe 实证）：`--with-deepmd=no` 为 2023.2 脚本未知旗标（execute.rs 与模板双处）；`x86_64` 为 toolchain 脚本非法 CPU 值（OpenBLAS getarch / gfortran -mtune 均拒）；MPICH+UCX 在无 IB 环境的线程探测误报——分别以旗标清理、x86_64→generic 翻译、`UCX_TLS` 注入修复
+- bunzip2 非 Ubuntu 包名（provider=bzip2）→ prereq 映射表补齐
+
 ### Added（第五期编译级缓存）
 
 - **Spack buildcache**：spack 系捆绑 Dockerfile 与模板把 24 个依赖包编译产物推入本地 buildcache mirror（独立 cache mount，`--unsigned` 无签名门槛）；同版本重建时依赖整包从 binary cache 安装——实测 Dockerfile 层失效后的二次构建 **7 分 06 秒**（冷轮 ~4h，107 处 relocating 命中、零源码编译）
