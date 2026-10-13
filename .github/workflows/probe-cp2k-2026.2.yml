@@ -1,0 +1,229 @@
+name: CP2K 2026.2 toolchain probe (TEMPORARY, wave 3 t9)
+
+# TEMPORARY probe artifact, not part of the product surface.
+#
+# Purpose (wave-3 plan t9, r2 revision): before committing 3-5h to the two
+# e2e-images dispatches (toolchain_2026.2_generic / cuda_2026.2_P100), prove
+# on a bare ubuntu-latest runner, against the REAL upstream support/v2026.2
+# tree, that:
+#   stage 1 (flag surface, ~15min): the toolchain script accepts BOTH flag
+#     vectors the synthesized Dockerfiles will use (CPU: --enable-cuda=no /
+#     GPU: --enable-cuda=yes --gpu-ver=P100 --with-libtorch=no), dry-run only;
+#     criterion = both vectors exit 0 AND the settings summary resolves cmake
+#     into "Packages to be installed" (the script hard-requires cmake, line
+#     "Require cmake as hard dependency" -> __INSTALL__), which also carries
+#     the risk-4 check (CP2K 2026.2 needs CMake >= 3.24; jammy apt ships 3.22,
+#     so --install-all must self-build cmake).
+#   stage 2 (component resolution, ~1.5-2h): the CPU vector is REALLY
+#     installed (-j 4), then the toolchain env is sourced and cmake runs in
+#     configure-only mode with the exact wave-2 cmake-arm flag set
+#     (EVERYTHING=ON + DLAF/PEXSI/DEEPMD/LIBTORCH=OFF + -Werror=dev, mirroring
+#     src/build/generate.rs). Criterion = configure exit 0; a missing-
+#     component error is the pre-registered risk-2 fallback trigger (add
+#     -DCP2K_USE_<X>=OFF, re-dispatch; minute-scale iteration, no 3h blind
+#     full builds).
+# Stage 1 falsification stops the e2e dispatches until the flag surface is
+# redesigned (no silent retry).
+#
+# Probe-side environment accommodation (workflow-only; product code, docker
+# files and other workflows untouched):
+#   - system mpich + libmpich-dev via apt: the runner ships no MPI and both
+#     vectors run --with-mpich=system (phase-6 wave-3 probe precedent;
+#     the product-level prereq path already auto-installs these for native).
+#   - the probe runs in ./cp2k (fresh clone), NOT through forge2k, so a probe
+#     failure can never corrupt product evidence.
+#
+# Exit semantics: each stage step is its own hard gate (rc captured via
+# PIPESTATUS so tee cannot swallow it; grep assertions on the teed output).
+# The final summary step (always()) prints the verdict matrix + PROBE_VERDICT.
+# DELETE this workflow once the dispatch evidence is recorded (plan t12:
+# separate add commit -> dispatch -> separate remove commit).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: cp2k 2026.2 toolchain probe (dry-run vectors + CPU install + cmake configure)
+    runs-on: ubuntu-latest
+    # Stage 1 ~15min + stage 2 install ~1.5-2h + configure minutes; 240 min
+    # job cap leaves headroom under the 6h GitHub hard cap (plan t9).
+    timeout-minutes: 240
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # Kept from the phase-6 probe shape: if the probe is extended to drive
+        # forge2k directly, the toolchain is already in place; this run does
+        # not build forge2k.
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: install system mpich + libmpich-dev (--with-mpich=system prereq)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y mpich libmpich-dev
+          echo "===== RUNNER_TOOLCHAIN_FACTS begin ====="
+          echo "os: $(grep PRETTY_NAME /etc/os-release | cut -d= -f2-)"
+          echo "cores: $(nproc)"
+          which mpicc && mpicc --version 2>&1 | head -n 1
+          which gfortran && gfortran --version 2>&1 | head -n 1
+          # Risk-4 baseline: system cmake version BEFORE the toolchain's own
+          # cmake is in play (jammy apt = 3.22 < 3.24 required by CP2K 2026.2).
+          which cmake && cmake --version 2>&1 | head -n 1
+          echo "===== RUNNER_TOOLCHAIN_FACTS end ====="
+
+      - name: clone cp2k support/v2026.2 (depth 1) + upstream layout facts
+        run: |
+          git clone -b support/v2026.2 --depth 1 https://github.com/cp2k/cp2k.git cp2k
+          echo "===== UPSTREAM_LAYOUT_FACTS begin ====="
+          git -C cp2k log --oneline -1
+          # Plan evidence baseline: v2026.x has NO root Makefile (make arm is
+          # dead there; forge2k synthesizes the cmake arm) and tools/spack is
+          # reshuffled (spack_repo/cp2k_dev) - spack is out of scope here.
+          if [ -f cp2k/Makefile ]; then echo "root Makefile: PRESENT (unexpected for 2026.x - re-check plan evidence)"; else echo "root Makefile: absent (expected)"; fi
+          ls cp2k/tools/toolchain/install_cp2k_toolchain.sh
+          ls cp2k/tools/spack/ | head -n 8
+          echo "===== UPSTREAM_LAYOUT_FACTS end ====="
+
+      # ---- stage 1: dry-run flag vectors (~15min) ------------------------
+      - name: "stage 1: toolchain dry-run, CPU + GPU flag vectors (hard gate)"
+        id: dryrun
+        working-directory: ./cp2k
+        run: |
+          set -o pipefail
+          set +e
+          echo "===== DRYRUN CPU vector begin: --enable-cuda=no ====="
+          ./tools/toolchain/install_cp2k_toolchain.sh --dry-run -j4 --install-all \
+            --enable-cuda=no --target-cpu=generic \
+            --with-cusolvermp=no --with-gcc=system --with-mpich=system 2>&1 | tee dryrun-cpu.txt
+          cpu_rc=${PIPESTATUS[0]}
+          echo "===== DRYRUN CPU vector end rc=${cpu_rc} ====="
+          echo "===== DRYRUN GPU vector begin: --enable-cuda=yes --gpu-ver=P100 --with-libtorch=no ====="
+          ./tools/toolchain/install_cp2k_toolchain.sh --dry-run -j4 --install-all \
+            --enable-cuda=yes --gpu-ver=P100 --with-libtorch=no \
+            --target-cpu=generic --with-cusolvermp=no --with-gcc=system --with-mpich=system 2>&1 | tee dryrun-gpu.txt
+          gpu_rc=${PIPESTATUS[0]}
+          echo "===== DRYRUN GPU vector end rc=${gpu_rc} ====="
+          set -e
+          echo "===== cmake resolution (risk 4: must land in install list) ====="
+          grep -n -A30 "Packages to be installed:" dryrun-cpu.txt || true
+          grep -n -A30 "Packages to be installed:" dryrun-gpu.txt || true
+          echo "===== GPU vector feature echo (cuda/gpu-ver) ====="
+          grep -nE "enable-cuda|gpu-ver" dryrun-gpu.txt || true
+          # Hard gates: both rc==0 AND the cmake entry resolved to install in
+          # both summaries (word-bounded grep; the summary prints "  - cmake").
+          if [ "${cpu_rc}" -ne 0 ] || [ "${gpu_rc}" -ne 0 ]; then
+            echo "DRYRUN_VERDICT:FAIL (cpu_rc=${cpu_rc} gpu_rc=${gpu_rc}) - stage-1 falsified, stop e2e dispatches, redesign flag surface" >&2
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*-[[:space:]]*cmake([[:space:]]|$)' dryrun-cpu.txt \
+             || ! grep -Eq '^[[:space:]]*-[[:space:]]*cmake([[:space:]]|$)' dryrun-gpu.txt; then
+            echo "DRYRUN_VERDICT:FAIL (cmake not in 'Packages to be installed' of one/both summaries; risk-4 unresolved)" >&2
+            exit 1
+          fi
+          echo "DRYRUN_VERDICT:PASS (both vectors exit 0, cmake resolves to __INSTALL__)"
+
+      # ---- stage 2: real CPU install + cmake configure-only --------------
+      - name: "stage 2a: toolchain REAL install, CPU vector -j 4 (hard gate)"
+        id: install
+        timeout-minutes: 180
+        working-directory: ./cp2k
+        run: |
+          set -o pipefail
+          # Pristine stage 2: drop the conf/env files stage 1's dry-runs wrote
+          # (and the GPU vector's settings with them) so the real install
+          # regenerates everything from its own parsed options.
+          rm -rf tools/toolchain/install
+          echo "===== INSTALL CPU vector begin at $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+          df -h /
+          ./tools/toolchain/install_cp2k_toolchain.sh -j 4 --install-all \
+            --enable-cuda=no --target-cpu=generic \
+            --with-cusolvermp=no --with-gcc=system --with-mpich=system 2>&1 | tee install-cpu.txt
+          rc=${PIPESTATUS[0]}
+          echo "===== INSTALL CPU vector end rc=${rc} at $(date -u +%Y-%m-%dT%H:%M:%SZ) ====="
+          df -h /
+          if [ "${rc}" -ne 0 ]; then
+            echo "INSTALL_VERDICT:FAIL rc=${rc} (see install-cpu.txt tail below)" >&2
+            tail -n 40 install-cpu.txt || true
+            exit 1
+          fi
+          echo "INSTALL_VERDICT:PASS rc=0"
+          ls tools/toolchain/install/setup
+
+      - name: "stage 2b: source toolchain env + cmake configure-only (hard gate)"
+        id: configure
+        working-directory: ./cp2k
+        run: |
+          set -o pipefail
+          echo "===== SETUP source begin ====="
+          set +e
+          source tools/toolchain/install/setup
+          source_rc=$?
+          set -e
+          echo "SETUP_SOURCE rc=${source_rc}"
+          if [ "${source_rc}" -ne 0 ]; then
+            echo "CONFIGURE_VERDICT:FAIL (source tools/toolchain/install/setup rc=${source_rc})" >&2
+            exit 1
+          fi
+          # Risk-4 transcription: WHICH cmake is picked up after sourcing the
+          # toolchain env (self-built >= 3.24 from install/bin vs system 3.22).
+          echo "===== cmake resolution after setup (risk 4) ====="
+          which cmake
+          cmake --version 2>&1 | head -n 2
+          echo "===== CMAKE configure begin (configure-only, no ninja build) ====="
+          # Exact wave-2 cmake-arm flag set (src/build/generate.rs): EVERYTHING
+          # on + DLAF/PEXSI/DEEPMD/LIBTORCH off; -Werror=dev turns dev warnings
+          # into the hard signal the probe exists to surface.
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCP2K_USE_EVERYTHING=ON \
+            -DCP2K_USE_DLAF=OFF \
+            -DCP2K_USE_PEXSI=OFF \
+            -DCP2K_USE_DEEPMD=OFF \
+            -DCP2K_USE_LIBTORCH=OFF \
+            -DCMAKE_INSTALL_PREFIX=/opt/cp2k \
+            -Werror=dev 2>&1 | tee cmake-configure.txt
+          rc=${PIPESTATUS[0]}
+          echo "===== CMAKE configure end rc=${rc} ====="
+          if [ "${rc}" -ne 0 ]; then
+            echo "CONFIGURE_VERDICT:FAIL rc=${rc} - apply risk-2 fallback (add -DCP2K_USE_<X>=OFF per the error), then re-dispatch; NO full ninja build here" >&2
+            tail -n 60 cmake-configure.txt || true
+            exit 1
+          fi
+          echo "CONFIGURE_VERDICT:PASS (configure exit 0; component resolution succeeded)"
+
+      # ---- verdict matrix (always runs, tolerant reader step) ------------
+      - name: probe verdict matrix (summary; never fails)
+        if: always()
+        run: |
+          dryrun="${{ steps.dryrun.outcome }}"
+          install="${{ steps.install.outcome }}"
+          configure="${{ steps.configure.outcome }}"
+          {
+            echo "===== PROBE_VERDICT_MATRIX ====="
+            echo "stage1 dry-run vectors : ${dryrun}"
+            echo "stage2a cpu install    : ${install}"
+            echo "stage2b cmake configure: ${configure}"
+          } | tee probe-verdict.txt
+          if [ "${dryrun}" = "success" ] && [ "${install}" = "success" ] && [ "${configure}" = "success" ]; then
+            echo "PROBE_VERDICT:PASS - proceed with e2e dispatches (toolchain_2026.2_generic, then cuda_2026.2_P100)" | tee -a probe-verdict.txt
+          else
+            echo "PROBE_VERDICT:FAIL - falsification recorded; fix per the failing stage's tail BEFORE dispatching e2e (no blind retry)" | tee -a probe-verdict.txt
+          fi
+
+      - name: upload probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-cp2k-2026.2-logs
+          path: |
+            cp2k/dryrun-cpu.txt
+            cp2k/dryrun-gpu.txt
+            cp2k/install-cpu.txt
+            cp2k/cmake-configure.txt
+            probe-verdict.txt
+          retention-days: 2
