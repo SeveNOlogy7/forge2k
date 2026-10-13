@@ -317,6 +317,7 @@ fn release_cmake_build_step(cuda: &str) -> String {
         )
     };
     // Wave 3 (probe run 38393254283): the dbcsr tarball build's `git describe` climbs into the outer cp2k clone (HEAD on tag v2026.2), so the installed DBCSRConfigVersion.cmake reports the malformed version `2026.2.v2026.2v2026.2` that SameMajorVersion rejects for find_package(DBCSR 2.8) (upstream CI's COPY ships no .git); cwd is the cp2k root and a glob miss must fail the build loudly, hence no `|| true`.
+    // Wave 3 (e2e runs 38404980161 CPU / 38405057080 GPU): both configure runs died at CP2K v2026.2 CMakeLists.txt:943 `find_package(openPMD 0.16.1 REQUIRED)` (CP2K_USE_OPENPMD, :174-175); the toolchain `--install-all` set ships no openPMD, so OPENPMD is the sole additional configure-stage OFF beyond the base four.
     let mut step = String::from(
         r#"SHELL ["/bin/bash", "-c"]
 WORKDIR /opt/cp2k
@@ -330,6 +331,7 @@ RUN source ${TOOLCHAIN_DIR}/install/setup && \
     -DCP2K_USE_PEXSI=OFF \
     -DCP2K_USE_DEEPMD=OFF \
     -DCP2K_USE_LIBTORCH=OFF \
+    -DCP2K_USE_OPENPMD=OFF \
 "#,
     );
     step.push_str(&cuda_flags);
