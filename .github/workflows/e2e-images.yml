@@ -7,11 +7,17 @@ name: E2E image build
 # native_* variants (phase-6 Wave 6) build CP2K directly on the runner instead:
 # no docker image is produced; acceptance = build exit code + exe existence
 # assertion + --version smoke (all hard gates).
+# The 2026.2 variants (wave 3, toolchain_2026.2_generic / cuda_2026.2_P100)
+# build the synthesized cmake-arm Dockerfiles (upstream dropped the root
+# Makefile in v2026.x, so forge2k emits a cmake build there): CPU smoke is a
+# hard gate, GPU smoke is tolerated (runner has no NVIDIA driver). The 2023.2
+# cuda_* steps keep the make arm and are pinned to explicit variant equality
+# so they cannot swallow the new cuda_2026.2_P100 variant.
 on:
   workflow_dispatch:
     inputs:
       variant:
-        description: Build variant (CUDA toolchain / spack docker image, or native runner build without docker)
+        description: Build variant (CUDA toolchain / spack docker image / native runner build without docker / 2026.2 toolchain-cmake image)
         type: choice
         required: true
         default: cuda_P100
@@ -21,6 +27,8 @@ on:
           - spack_2025.2_x86_64
           - native_2023.2_x86_64_none
           - native_2023.2_generic_none
+          - toolchain_2026.2_generic
+          - cuda_2026.2_P100
 
 jobs:
   e2e-image:
@@ -35,9 +43,11 @@ jobs:
     # Toolchain build on a 4-core runner is expected to take 1.5-3h: 330 min.
     # Spack variant: deps compile ~4.2h + cp2k ~19min + push/transport, so 350
     # min (step cap 340). Native variant: toolchain install 1.5-3h + cp2k make
-    # 2-4h, same 350/340 arithmetic (phase-6 plan default 9). All stay under
-    # the 6h (360 min) GitHub hard cap.
-    timeout-minutes: ${{ (inputs.variant == 'spack_2025.2_x86_64' || startsWith(inputs.variant, 'native_')) && 350 || 330 }}
+    # 2-4h, same 350/340 arithmetic (phase-6 plan default 9). The 2026.2
+    # toolchain-cmake variants (wave 3) share the 350/340 arithmetic: the cold
+    # --install-all dependency compile on a 4-core runner is estimated 2-4h
+    # (wave-3 plan default 5). All stay under the 6h (360 min) GitHub hard cap.
+    timeout-minutes: ${{ (inputs.variant == 'spack_2025.2_x86_64' || inputs.variant == 'toolchain_2026.2_generic' || inputs.variant == 'cuda_2026.2_P100' || startsWith(inputs.variant, 'native_')) && 350 || 330 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -47,7 +57,7 @@ jobs:
           VARIANT: ${{ inputs.variant }}
         run: |
           case "$VARIANT" in
-            cuda_P100|cuda_V100|spack_2025.2_x86_64|native_2023.2_x86_64_none|native_2023.2_generic_none) echo "variant ok: $VARIANT" ;;
+            cuda_P100|cuda_V100|spack_2025.2_x86_64|native_2023.2_x86_64_none|native_2023.2_generic_none|toolchain_2026.2_generic|cuda_2026.2_P100) echo "variant ok: $VARIANT" ;;
             *) echo "unknown variant: $VARIANT" >&2; exit 1 ;;
           esac
 
@@ -194,7 +204,11 @@ jobs:
           fi
 
       - name: forge2k build -m toolchain -v 2023.2 --cpu generic --cuda $CUDA
-        if: startsWith(inputs.variant, 'cuda_')
+        # Narrowed from the old startsWith(inputs.variant, 'cuda_') (wave 3):
+        # explicit equality keeps the 2023.2 make-arm build from swallowing
+        # the new cuda_2026.2_P100 variant, which builds the 2026.2 cmake arm
+        # in its own step below. Behavior for cuda_P100/cuda_V100 is unchanged.
+        if: inputs.variant == 'cuda_P100' || inputs.variant == 'cuda_V100'
         timeout-minutes: 300
         env:
           # Map the dispatch choice to the forge2k --cuda value.
@@ -210,8 +224,35 @@ jobs:
           set -o pipefail
           ./target/debug/forge2k build -m spack -v 2025.2 --cpu x86_64 2>&1 | tee build-log.txt
 
+      # --- 2026.2 toolchain-cmake variants (wave 3) ------------------------
+      # CP2K 2026.2 has no root Makefile upstream, so forge2k synthesizes the
+      # 2026.2 Dockerfiles through the cmake arm (wave 2: toolchain_uses_cmake
+      # true for >= 2026.1). Both steps are single-variant gated by explicit
+      # equality; nothing in the spack ring or the native branch matches these
+      # variant names. Step cap 340 mirrors the spack arithmetic (plan
+      # default 5: cold --install-all compile estimated 2-4h, job cap 350).
+      - name: forge2k build -m toolchain -v 2026.2 --cpu generic --cuda none
+        if: inputs.variant == 'toolchain_2026.2_generic'
+        timeout-minutes: 340
+        run: |
+          set -o pipefail
+          ./target/debug/forge2k build -m toolchain -v 2026.2 --cpu generic --cuda none 2>&1 | tee build-log.txt
+
+      - name: forge2k build -m toolchain -v 2026.2 --cpu generic --cuda $CUDA
+        if: inputs.variant == 'cuda_2026.2_P100'
+        timeout-minutes: 340
+        env:
+          # Single-variant step, so the mapping is a constant (the 2023.2 cuda
+          # step above switches on the variant name; this one has one choice).
+          CUDA: P100
+        run: |
+          set -o pipefail
+          ./target/debug/forge2k build -m toolchain -v 2026.2 --cpu generic --cuda "$CUDA" 2>&1 | tee build-log.txt
+
       - name: smoke test docker run cp2k --version (no NVIDIA driver on runner; tolerated)
-        if: startsWith(inputs.variant, 'cuda_')
+        # Narrowed together with the build step above (wave 3): explicit
+        # equality, so the 2023.2 smoke cannot catch cuda_2026.2_P100.
+        if: inputs.variant == 'cuda_P100' || inputs.variant == 'cuda_V100'
         env:
           CUDA: ${{ inputs.variant == 'cuda_V100' && 'V100' || 'P100' }}
         run: |
@@ -225,6 +266,20 @@ jobs:
           echo "=== smoke begin: docker run --rm cp2k/cp2k:2025.2_mpich_x86_64_psmp cp2k --version ==="
           docker run --rm cp2k/cp2k:2025.2_mpich_x86_64_psmp cp2k --version
           echo "=== smoke end: spack image has no GPU dependency, this step is a hard acceptance gate ==="
+
+      - name: smoke test docker run cp2k --version (2026.2 CPU variant; hard gate)
+        if: inputs.variant == 'toolchain_2026.2_generic'
+        run: |
+          echo "=== smoke begin: docker run --rm cp2k/cp2k:2026.2_mpich_generic_psmp cp2k --version ==="
+          docker run --rm cp2k/cp2k:2026.2_mpich_generic_psmp cp2k --version
+          echo "=== smoke end: CPU image has no GPU dependency, this step is a hard acceptance gate ==="
+
+      - name: smoke test docker run cp2k --version (2026.2 GPU variant; no NVIDIA driver on runner; tolerated)
+        if: inputs.variant == 'cuda_2026.2_P100'
+        run: |
+          echo "=== smoke begin: docker run --rm cp2k/cp2k:2026.2_mpich_generic_cuda_P100_psmp cp2k --version ==="
+          docker run --rm cp2k/cp2k:2026.2_mpich_generic_cuda_P100_psmp cp2k --version || true
+          echo "=== smoke end: runner has no NVIDIA driver, so this may fail without invalidating the job; the forge2k build step above is the acceptance gate ==="
 
       - name: export spack buildcache (mount -> host)
         id: bcexport
