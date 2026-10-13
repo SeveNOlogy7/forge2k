@@ -1662,3 +1662,251 @@ fn t_o22_log_level_equality_matrix_pins_branch_conditions() {
     assert_eq!((wrn == wrn, wrn == err), (true, false));
     assert_eq!((err == wrn, err == err), (false, true));
 }
+
+// --------------------------------------------------------
+// Wave 1 (t26): CP2K 2026.2 toolchain capability assertions
+// (red wave — the cmake arm, the CUDA cmake flags and the 2026.2
+// registrations do not exist yet; these tests go green in Wave 2)
+// --------------------------------------------------------
+
+/// (i) Predicate boundary: `toolchain_uses_cmake` must select the make
+/// path for releases that still ship a root Makefile (up to v2025.2) and
+/// the cmake path for master and every release from v2026.1 on (upstream
+/// deleted the root Makefile/arch in v2026.1).
+#[test]
+fn t26_toolchain_uses_cmake_predicate_boundary() {
+    // false side (regression guard for the make-based releases)
+    for version in ["2023.2", "2025.2"] {
+        assert!(
+            !super::generate::toolchain_uses_cmake(version),
+            "T26: toolchain_uses_cmake({version}) must be false — pre-2026 releases build via make"
+        );
+    }
+    // true side: collect every violation so one red message pins the
+    // whole boundary (the wave-1 stub answers false for everything)
+    let mut got_false: Vec<&str> = Vec::new();
+    for version in ["2026.1", "2026.2", "2027.1", "master"] {
+        if !super::generate::toolchain_uses_cmake(version) {
+            got_false.push(version);
+        }
+    }
+    assert!(
+        got_false.is_empty(),
+        "T26: toolchain_uses_cmake must be true for master and >=2026.1 (no root Makefile upstream), got false for: {:?}",
+        got_false
+    );
+}
+
+/// (ii) 2026.2 CPU render (toolchain/mpich/generic/none/psmp) must go
+/// through the cmake arm: the full cmake flag surface, no make step, no
+/// CUDA cmake flag, and the structural cache mounts stay intact
+/// (t_c14 pattern).
+#[test]
+fn t26_2026_2_cpu_render_uses_cmake_arm() {
+    let c = base_config("toolchain", "2026.2", "mpich", "generic", "none", "psmp");
+    let content =
+        generate_dockerfile_content(&c).expect("render toolchain template for 2026.2 CPU");
+
+    // structural mounts keep the t_c14 contract (green now, regression
+    // guard once Wave 2 lands)
+    let (stage1, stage2) = split_stages(&content);
+    let apt_spec = "--mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked";
+    assert!(
+        stage1.contains(apt_spec) && stage2.contains(apt_spec),
+        "T26: 2026.2 CPU render must mount apt-2204 in BOTH stages (stage1 hit: {}, stage2 hit: {})",
+        stage1.contains(apt_spec),
+        stage2.contains(apt_spec)
+    );
+    let tarball_spec =
+        "--mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarballs,sharing=locked";
+    assert!(
+        content.contains(tarball_spec),
+        "T26: 2026.2 CPU render must mount id=toolchain-tarballs on the toolchain build dir (target/id/sharing combo)"
+    );
+
+    // canon-git: version-keyed id and support/v2026.2 ref on ONE line
+    let git_line = line_containing(
+        &content,
+        "id=cp2k-src-2026.2",
+        "2026.2 CPU canon-git block keyed cp2k-src-2026.2",
+    );
+    assert_canon_git_line(git_line, "REF=support/v2026.2;");
+
+    // the toolchain script stays CPU-only
+    assert!(
+        content.contains("--enable-cuda=no") && content.contains("--target-cpu=generic"),
+        "T26: 2026.2 CPU render must pass --enable-cuda=no and --target-cpu=generic to the toolchain script"
+    );
+
+    // cmake-arm flag surface (master-arm base set + LIBTORCH OFF, plan
+    // default 8); collect every missing marker into one red message
+    const REQUIRED: [&str; 6] = [
+        "cmake -GNinja",
+        "-DCP2K_USE_EVERYTHING=ON",
+        "-DCP2K_USE_DLAF=OFF",
+        "-DCP2K_USE_PEXSI=OFF",
+        "-DCP2K_USE_DEEPMD=OFF",
+        "-DCP2K_USE_LIBTORCH=OFF",
+    ];
+    let mut missing: Vec<&str> = Vec::new();
+    for marker in REQUIRED {
+        if !content.contains(marker) {
+            missing.push(marker);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "T26: 2026.2 CPU render must carry the full cmake-arm flag surface, missing: {:?}",
+        missing
+    );
+
+    // the make arm must be gone, and no CUDA cmake flag may leak into a
+    // CPU-only render
+    assert!(
+        !content.contains("make -j"),
+        "T26: 2026.2 CPU render must not carry the make build step (upstream deleted the root Makefile in v2026.1)"
+    );
+    assert!(
+        !content.contains("-DCP2K_USE_ACCEL"),
+        "T26: 2026.2 CPU render must not carry any CUDA cmake flag"
+    );
+    assert!(
+        !content.contains("{{"),
+        "T26: no template placeholder may survive rendering (2026.2 CPU):\n{}",
+        content
+    );
+}
+
+/// (iii) 2026.2 GPU render (toolchain/mpich/generic/P100/psmp): nvidia
+/// base + the CUDA toolchain flag run, plus the CUDA cmake triple and
+/// the shared LIBTORCH OFF (upstream make_cp2k.sh:898-901, P100 -> sm 60).
+#[test]
+fn t26_2026_2_gpu_render_uses_cuda_cmake_flags() {
+    let c = base_config("toolchain", "2026.2", "mpich", "generic", "P100", "psmp");
+    let content =
+        generate_dockerfile_content(&c).expect("render toolchain template for 2026.2 GPU");
+
+    assert!(
+        content.contains("FROM nvidia/cuda:12.2.0-devel-ubuntu22.04"),
+        "T26: 2026.2 GPU render must be FROM the nvidia/cuda 12.2 devel image"
+    );
+    let cuda_run = "--enable-cuda=yes --gpu-ver=P100 --with-libtorch=no";
+    assert!(
+        content.contains(cuda_run),
+        "T26: 2026.2 GPU render must pass the CUDA flag run {:?} to the toolchain script",
+        cuda_run
+    );
+
+    // CUDA cmake flag surface; collect every missing marker into one
+    // red message
+    const REQUIRED: [&str; 4] = [
+        "-DCP2K_USE_ACCEL=CUDA",
+        "-DCP2K_WITH_GPU=P100",
+        "-DCMAKE_CUDA_ARCHITECTURES=60",
+        "-DCP2K_USE_LIBTORCH=OFF",
+    ];
+    let mut missing: Vec<&str> = Vec::new();
+    for marker in REQUIRED {
+        if !content.contains(marker) {
+            missing.push(marker);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "T26: 2026.2 GPU render must carry the CUDA cmake flag surface, missing: {:?}",
+        missing
+    );
+
+    assert!(
+        !content.contains("{{"),
+        "T26: no template placeholder may survive rendering (2026.2 GPU):\n{}",
+        content
+    );
+}
+
+/// (iv) resolve_dockerfile() for 2026.2 (no bundled file) must write a
+/// real file carrying the 2026.2 canon-git line and the cmake-arm build
+/// step, fully rendered (fallback pattern of
+/// t13_resolve_dockerfile_falls_back_to_synthesized_when_no_bundled_match,
+/// with cleanup receipt).
+#[test]
+fn t26_2026_2_resolve_dockerfile_synthesizes_cmake_file() {
+    let c = base_config("toolchain", "2026.2", "mpich", "generic", "none", "psmp");
+    let path = c.resolve_dockerfile().expect("2026.2 synthesized fallback");
+    assert!(
+        path.exists(),
+        "T26: 2026.2 synthesized fallback must write a real file, got: {}",
+        path.display()
+    );
+    let content = std::fs::read_to_string(&path).expect("read synthesized 2026.2 file");
+
+    // 2026.2 marker: canon-git id + ref on ONE line
+    let git_line = line_containing(
+        &content,
+        "id=cp2k-src-2026.2",
+        "resolved 2026.2 canon-git block keyed cp2k-src-2026.2",
+    );
+    assert_canon_git_line(git_line, "REF=support/v2026.2;");
+
+    // capability marker: the resolved file must be the cmake path
+    assert!(
+        content.contains("cmake -GNinja"),
+        "T26: resolved 2026.2 dockerfile must use the cmake+ninja build step"
+    );
+    assert!(
+        !content.contains("{{"),
+        "T26: resolved 2026.2 dockerfile must be fully rendered"
+    );
+
+    // cleanup receipt: remove the generated file
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        !path.exists(),
+        "T26: generated 2026.2 dockerfile must be cleaned up"
+    );
+}
+
+/// (v) catalog: the synthesized table must advertise exactly the two
+/// toolchain 2026.2 entries as Synthesized; spack 2026.2 must NOT be
+/// advertised (upstream tools/spack reshuffle; delegating to
+/// make_cp2k.sh is backlog only).
+#[test]
+fn t26_catalog_advertises_2026_2_toolchain_only() {
+    let configs = list_available_configs();
+
+    // both 2026.2 toolchain entries must be advertised as Synthesized;
+    // collect all absent tuples so one red message pins the full set
+    let mut missing: Vec<String> = Vec::new();
+    for cuda in ["none", "P100"] {
+        let want = format!("(toolchain,2026.2,mpich,generic,{cuda},psmp)");
+        match configs.iter().find(|c| {
+            c.method == "toolchain"
+                && c.version == "2026.2"
+                && c.mpi == "mpich"
+                && c.cpu == "generic"
+                && c.cuda == cuda
+                && c.variant == "psmp"
+        }) {
+            None => missing.push(want),
+            Some(hit) => assert_eq!(
+                hit.source,
+                DockerfileSource::Synthesized,
+                "T26: {} must be advertised as Synthesized, got {:?}",
+                want,
+                hit.source
+            ),
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "T26: list_available_configs must advertise the 2026.2 toolchain entries, missing: {:?}",
+        missing
+    );
+
+    assert!(
+        !configs
+            .iter()
+            .any(|c| c.method == "spack" && c.version == "2026.2"),
+        "T26: spack 2026.2 must not be advertised (upstream tools/spack reshuffle)"
+    );
+}

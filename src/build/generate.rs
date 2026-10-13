@@ -269,3 +269,14 @@ exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint
         ],
     ))
 }
+
+/// Wave 1 (red) stub: the cmake-vs-make predicate entry point exists so
+/// the 2026.2 capability tests compile, but it always answers false (the
+/// pre-2026 make path). Wave 2 replaces this body with the real boundary
+/// (`master` || version >= "2026.1" — upstream deleted the root Makefile
+/// in v2026.1) and wires the `use_cmake` call site to it. `#[cfg(test)]`
+/// until then, so non-test builds carry no dead code.
+#[cfg(test)]
+pub(crate) fn toolchain_uses_cmake(_version: &str) -> bool {
+    false
+}
