@@ -182,6 +182,8 @@ pub fn list_available_configs() -> Vec<ConfigInfo> {
         ("spack", "2026.1", "mpich", "cascadelake", "none", "psmp"),
         ("spack", "2026.1", "openmpi", "cascadelake", "none", "psmp"),
         ("toolchain", "master", "mpich", "generic", "none", "psmp"),
+        ("toolchain", "2026.2", "mpich", "generic", "none", "psmp"),
+        ("toolchain", "2026.2", "mpich", "generic", "P100", "psmp"),
     ];
     for (method, version, mpi, cpu, cuda, variant) in synthesized {
         let bundled = configs.iter().any(|c| {

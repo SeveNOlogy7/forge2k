@@ -47,7 +47,7 @@ enum Commands {
         #[arg(short = 'm', long = "method", default_value = "spack", value_parser = clap::builder::PossibleValuesParser::new(["spack", "toolchain", "native"]))]
         method: String,
 
-        /// CP2K version: 2026.1, 2025.2, 2023.2, or 'master' for latest HEAD
+        /// CP2K version: 2026.2, 2026.1, 2025.2, 2023.2, or 'master' for latest HEAD
         #[arg(short = 'v', long = "version", default_value = "2026.1")]
         version: String,
 
@@ -90,6 +90,12 @@ enum Commands {
         /// Skip Docker engine check
         #[arg(long = "force")]
         force: bool,
+
+        /// Generate the Dockerfile only: skip the Docker engine check and
+        /// the confirmation prompt, resolve/synthesize the Dockerfile and
+        /// print its path (exit 0 without building)
+        #[arg(long = "generate-only")]
+        generate_only: bool,
     },
 
     /// List all available pre-configured build configurations
@@ -189,9 +195,21 @@ fn main() -> Result<()> {
             dockerfile,
             shm_size,
             force,
+            generate_only,
         } => cmd_build(
-            method, version, mpi, cpu, cuda, variant, jobs, tag, no_cache, dockerfile, shm_size,
+            method,
+            version,
+            mpi,
+            cpu,
+            cuda,
+            variant,
+            jobs,
+            tag,
+            no_cache,
+            dockerfile,
+            shm_size,
             force,
+            generate_only,
         ),
         Commands::List { method, version } => cmd_list(method, version),
         Commands::Gui => cmd_gui(),
@@ -222,11 +240,13 @@ fn cmd_build(
     dockerfile: Option<String>,
     shm_size: String,
     force: bool,
+    generate_only: bool,
 ) -> Result<()> {
     print_banner();
 
-    // Check Docker
-    if !force {
+    // Check Docker (skipped by --generate-only: no daemon is needed to
+    // resolve or synthesize a Dockerfile)
+    if !force && !generate_only {
         match check_docker() {
             DockerStatus::Installed {
                 version: ver,
@@ -283,6 +303,12 @@ fn cmd_build(
     println!("  Jobs:       {}", config.jobs.to_string().cyan());
     println!("  Image Tag:  {}", config.default_tag().cyan());
     println!();
+
+    if generate_only {
+        let path = config.resolve_dockerfile()?;
+        println!("Generated Dockerfile: {}", path.display());
+        return Ok(());
+    }
 
     if !ask_continue("Start build?") {
         println!("{} Build cancelled.", "⏹".yellow());

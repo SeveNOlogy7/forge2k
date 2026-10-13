@@ -461,7 +461,7 @@ impl Forge2kApp {
                 .collect()
         };
         let versions: Vec<String> = if self.method == "native" {
-            vec!["master", "2026.1", "2025.2", "2024.3"]
+            vec!["master", "2026.1", "2026.2", "2025.2", "2024.3"]
                 .into_iter()
                 .map(String::from)
                 .collect()
@@ -1095,7 +1095,7 @@ impl Forge2kApp {
             ui.add_space(16.0);
 
             ui.label("A beautiful cross-platform GUI + CLI tool for building CP2K Docker images,");
-            ui.label("with Spack (v2025.2+), Toolchain (v2023.2+), master and native builds.");
+            ui.label("with Spack (v2025.2+), Toolchain (v2023.2+), v2026.2 (cmake), master and native builds.");
             ui.add_space(16.0);
 
             let features = [
@@ -1120,7 +1120,7 @@ impl Forge2kApp {
             ui.label(RichText::new("⚠ Known limitations").size(14.0).strong());
             let limitations = [
                 "• Toolchain CUDA (P100/V100) variants: full image-level e2e deferred",
-                "• 2026.1 & master: no bundled Dockerfile, synthesized per build (e2e deferred)",
+                "• 2026.1, 2026.2 & master: no bundled Dockerfile, synthesized per build (e2e deferred)",
                 "• Release-mode CLI build: docker stdout not forwarded (kept as-is, pending OD-1)",
             ];
             for l in &limitations {
