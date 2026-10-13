@@ -1984,3 +1984,76 @@ fn t_wave3_master_and_make_arms_render_no_dbcsr_patch() {
         );
     }
 }
+
+// --------------------------------------------------------
+// Wave 3: minimal OFF set for components absent from the
+// toolchain --install-all install set
+// --------------------------------------------------------
+//
+// e2e runs 38404980161 (toolchain_2026.2_generic, CPU) and 38405057080
+// (cuda_2026.2_P100, GPU) both died at the SAME configure point: CP2K
+// v2026.2 CMakeLists.txt:943 `find_package(openPMD 0.16.1 REQUIRED)`
+// behind `CP2K_USE_OPENPMD` (CMakeLists.txt:174-175). The toolchain
+// `--install-all` set (36 packages) ships no openPMD. The other toolchain
+// "Packages not used" entries are safe under the rendered flags: dftd4 is
+// found inside the tblite install dir (run log: `Found DFTD4: .../
+// tblite-0.6.0/lib/libdftd4.a`), libgint is CUDA-gated on the cmake side
+// (CP2K_USE_LIBGINT dependent option, CMakeLists.txt:241-244; the GPU
+// toolchain installs it and the GPU run passed CMakeLists.txt:836),
+// libxstream is OpenCL-only and cusolvermp defaults OFF. Hence the
+// minimal configure-stage OFF set is exactly {CP2K_USE_OPENPMD}; master
+// and the make arms stay untouched (pinned regression guards).
+
+/// The 2026.2 release-cmake renders (CPU and GPU) must disable openPMD on
+/// top of the existing DLAF/PEXSI/DEEPMD/LIBTORCH OFF surface, with the
+/// new flag slotted into the shared base flag block (after LIBTORCH OFF,
+/// before the IPO/LTO block) so the CUDA triple keeps its slot.
+#[test]
+fn t_wave3_2026_2_release_arm_disables_openpmd() {
+    for cuda in ["none", "P100"] {
+        let c = base_config("toolchain", "2026.2", "mpich", "generic", cuda, "psmp");
+        let content =
+            generate_dockerfile_content(&c).expect("render toolchain template for 2026.2");
+
+        assert!(
+            content.contains("-DCP2K_USE_OPENPMD=OFF"),
+            "T-W3: 2026.2 (cuda={cuda}) release-cmake render must carry -DCP2K_USE_OPENPMD=OFF (e2e runs 38404980161/38405057080 died at CMakeLists.txt:943 find_package(openPMD 0.16.1 REQUIRED); the toolchain --install-all set ships no openPMD)"
+        );
+
+        // ordering: the new flag belongs to the shared base block — after
+        // the existing LIBTORCH OFF and before the IPO/LTO block — so the
+        // CUDA triple (GPU render) keeps its slot between the two.
+        let libtorch_at = content
+            .find("-DCP2K_USE_LIBTORCH=OFF")
+            .expect("T-W3: release-cmake render must carry the LIBTORCH OFF flag");
+        let openpmd_at = content
+            .find("-DCP2K_USE_OPENPMD=OFF")
+            .expect("T-W3: OPENPMD OFF flag located above must be a substring");
+        let ipo_at = content
+            .find("-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF")
+            .expect("T-W3: release-cmake render must carry the IPO OFF flag");
+        assert!(
+            libtorch_at < openpmd_at && openpmd_at < ipo_at,
+            "T-W3: 2026.2 (cuda={cuda}) OPENPMD OFF must sit in the shared base block (LIBTORCH at {libtorch_at}, OPENPMD at {openpmd_at}, IPO at {ipo_at})"
+        );
+    }
+}
+
+/// Master (cmake arm) and 2023.2 (make arm) must stay untouched: the
+/// openPMD OFF is release-cmake-arm-only and both arms are byte-frozen by
+/// earlier wave guards.
+#[test]
+fn t_wave3_master_and_make_arms_render_no_openpmd_off() {
+    for (version, what) in [
+        ("master", "master cmake arm"),
+        ("2023.2", "2023.2 make arm"),
+    ] {
+        let c = base_config("toolchain", version, "mpich", "generic", "none", "psmp");
+        let content =
+            generate_dockerfile_content(&c).expect("render toolchain template for {version}");
+        assert!(
+            !content.contains("CP2K_USE_OPENPMD"),
+            "T-W3: the {what} render must stay free of the openPMD OFF flag (pinned regression guard)"
+        );
+    }
+}
