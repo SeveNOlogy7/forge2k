@@ -1910,3 +1910,77 @@ fn t26_catalog_advertises_2026_2_toolchain_only() {
         "T26: spack 2026.2 must not be advertised (upstream tools/spack reshuffle)"
     );
 }
+
+// --------------------------------------------------------
+// Wave 3: DBCSR config-version patch in the release-cmake arm
+// --------------------------------------------------------
+//
+// Probe run 38393254283 (stage 2b, cmake-configure.txt:48-55): the dbcsr
+// tarball build's `git describe` climbs out of its build dir into the outer
+// cp2k clone whose HEAD sits on tag v2026.2, so the installed
+// DBCSRConfigVersion.cmake reports the malformed version
+// `2026.2.v2026.2v2026.2` and `find_package(DBCSR 2.8)` (CP2K
+// CMakeLists.txt:551) is rejected by the SameMajorVersion check. Upstream
+// CI is immune (COPY, no .git); every git-clone build must patch the
+// installed config version before configuring. The matcher below is
+// deliberately tolerant (`sed -i` + `DBCSRConfigVersion.cmake` on ONE
+// physical line) so a cwd-driven path adjustment cannot break the test.
+
+/// The release-cmake arm (2026.2 CPU and GPU renders) must patch the dbcsr
+/// config version between sourcing the toolchain env and the cmake call.
+#[test]
+fn t_wave3_dbcsr_version_patch_sits_between_source_and_cmake() {
+    for cuda in ["none", "P100"] {
+        let c = base_config("toolchain", "2026.2", "mpich", "generic", cuda, "psmp");
+        let content =
+            generate_dockerfile_content(&c).expect("render toolchain template for 2026.2");
+
+        let sed_line = content
+            .lines()
+            .find(|l| l.contains("sed -i") && l.contains("DBCSRConfigVersion.cmake"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "T-W3: 2026.2 (cuda={cuda}) render must carry a dbcsr config-version sed line (sed -i + DBCSRConfigVersion.cmake on one physical line)"
+                )
+            });
+        assert!(
+            sed_line.contains("PACKAGE_VERSION"),
+            "T-W3: 2026.2 (cuda={cuda}) dbcsr sed line must rewrite PACKAGE_VERSION, got: {sed_line}"
+        );
+
+        // ordering: after the toolchain env source, before the cmake call
+        let src_at = content
+            .find("source ${TOOLCHAIN_DIR}/install/setup")
+            .expect("T-W3: release-cmake render must source the toolchain env");
+        let sed_at = content
+            .find(sed_line)
+            .expect("T-W3: sed line located above must be a substring of the render");
+        let cmake_at = content
+            .find("cmake -GNinja")
+            .expect("T-W3: release-cmake render must call cmake");
+        assert!(
+            src_at < sed_at && sed_at < cmake_at,
+            "T-W3: dbcsr sed line must sit after the toolchain source (at {src_at}) and before the cmake call (at {cmake_at}), found at {sed_at}"
+        );
+    }
+}
+
+/// Master (cmake arm) and 2023.2 (make arm) must stay untouched: the dbcsr
+/// patch is release-cmake-arm-only. Master is a rolling branch whose
+/// describe yields a v*.*-N-gHASH string by construction (no tag on HEAD),
+/// and Wave 2 froze its rendered bytes.
+#[test]
+fn t_wave3_master_and_make_arms_render_no_dbcsr_patch() {
+    for (version, what) in [
+        ("master", "master cmake arm"),
+        ("2023.2", "2023.2 make arm"),
+    ] {
+        let c = base_config("toolchain", version, "mpich", "generic", "none", "psmp");
+        let content =
+            generate_dockerfile_content(&c).expect("render toolchain template for {version}");
+        assert!(
+            !content.contains("DBCSRConfigVersion.cmake"),
+            "T-W3: the {what} render must stay free of the dbcsr config-version patch"
+        );
+    }
+}
