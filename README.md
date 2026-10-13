@@ -41,7 +41,7 @@ forge2k list
 
 ```text
 -m,  --method <METHOD>    构建方法: spack / toolchain / native [默认: spack]
--v,  --version <VERSION>  CP2K 版本: 2026.1 / 2025.2 / 2023.2 / master [默认: 2026.1]
+-v,  --version <VERSION>  CP2K 版本: 2026.2 / 2026.1 / 2025.2 / 2023.2 / master [默认: 2026.1]
      --mpi <MPI>          MPI 实现: mpich / openmpi [默认: mpich]
      --cpu <CPU>          CPU 目标: x86_64 / generic / cascadelake / haswell / skylake-avx512 [默认: x86_64]
      --cuda <CUDA>        CUDA GPU: none / P100 / V100 [默认: none]
@@ -71,8 +71,8 @@ forge2k list
 
 ## 构建方法
 
-- **spack**（默认）：基于 `ubuntu:24.04`，两段式构建——Spack 环境解析 CP2K 依赖后安装，运行时镜像只保留安装产物。支持 v2025.2+ 与 master。
-- **toolchain**：基于 `ubuntu:22.04`（CUDA 变体基于 `nvidia/cuda:12.2.0-devel`），运行 CP2K 官方 `install_cp2k_toolchain.sh` 后 `make`。支持 v2023.2 与 CUDA（P100/V100）。
+- **spack**（默认）：基于 `ubuntu:24.04`，两段式构建——Spack 环境解析 CP2K 依赖后安装，运行时镜像只保留安装产物。支持 v2025.2、v2026.1 与 master（2026.2 暂不支持，见已知限制）。
+- **toolchain**：基于 `ubuntu:22.04`（CUDA 变体基于 `nvidia/cuda:12.2.0-devel`），运行 CP2K 官方 `install_cp2k_toolchain.sh` 安装依赖后构建：v2023.2 走 `make`；2026.1/2026.2 与 master 上游已无根 Makefile，走 `cmake -GNinja` 构建路径。支持 v2023.2、v2026.1、v2026.2 与 master，CUDA（P100/V100）变体对 v2026.2 同样可用。
 - **native**：不经 Docker，直接在主机上克隆 CP2K 源码、跑 toolchain 安装、CMake/make 构建。支持 6 种组合：CPU（generic / x86_64）× CUDA（none / P100 / V100），MPI 锁定 system mpich、variant 锁定 psmp（与其他变体矩阵对齐）；master 分支 + CUDA 的组合显式拒绝（cmake 路径不支持）。MPI 缺失时自动 apt 补装（mpich/libmpich-dev）。已在 GitHub Actions ubuntu runner 上验证 x86_64/generic 两组合全链路构建 + 产物 `--version` 冒烟。
 
 ## Dockerfile 捆绑清单
@@ -86,7 +86,7 @@ forge2k list
 | `dockerfiles/toolchain/2023.2_mpich_generic_cuda_P100_psmp.Dockerfile` | Toolchain + CUDA P100 |
 | `dockerfiles/toolchain/2023.2_mpich_generic_cuda_V100_psmp.Dockerfile` | Toolchain + CUDA V100 |
 
-**默认版本 2026.1（与 master）没有捆绑 Dockerfile**：构建时 Forge2K 会按 `src/templates/` 模板现场合成（日志中会显式提示 synthesized），功能等价但未经镜像级端到端验证。捆绑的 2025.2 spack 镜像与 2023.2 toolchain 镜像已做过全量构建与运行冒烟验证。
+**2026.1 / 2026.2（与 master）没有捆绑 Dockerfile**：构建时 Forge2K 会按 `src/templates/` 模板现场合成（日志中会显式提示 synthesized）；2026.2 与 2026.1 语境一致，仅提供 toolchain 方法合成模板（generic CPU 与 CUDA P100 两组合，psmp 变体），无捆绑 Dockerfile。捆绑的 2025.2 spack 镜像与 2023.2 toolchain 镜像已做过全量构建与运行冒烟验证；2026.1/master 合成路径未经镜像级端到端验证，2026.2 的 CI 编译验证状态见已知限制。
 
 ## 发布
 
@@ -155,6 +155,8 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 时于 ubuntu / windows 双平
 - Windows release 构建是 GUI 子系统，CLI 无 stdout（退出码正常）；debug 构建不受影响
 - native 构建的 MPI 锁定 system mpich、variant 锁定 psmp（master 分支 + CUDA 组合显式拒绝）；已在 GitHub Actions ubuntu runner 验证 x86_64/generic 两组合全链路（含 `--version` 冒烟），CUDA 两组合构建面支持但未经镜像级验证（runner 无 NVIDIA 驱动/CUDA toolkit，backlog）
 - CUDA P100/V100 变体已在 GitHub Actions 完成全量构建验证（2026-09-29，均成功）；容器内 `cp2k --version` 需 NVIDIA 驱动（无 GPU 主机因缺 libcuda.so.1 无法运行，属环境边界非镜像缺陷）
-- 2026.1 / master 走 synthesized 合成路径（见上）
+- 2026.1 / 2026.2 / master 走 synthesized 合成路径（见上）
+- spack 方法暂不支持 2026.2：上游 support/v2026.2 已重排 `tools/spack`（`cp2k_dev_repo` → `spack_repo/cp2k_dev`、deps yaml 改名 `cp2k_deps_p.yaml`、spack 包本体已从上游 tools/spack 仓库移除），现有 spack 模板引用失效——backlog 为委托上游 `make_cp2k.sh` 路径，当前 2026.2 仅 toolchain 方法可用
+- 2026.2 CI 验证状态（2026-10-13）：e2e 双变体 CPU `toolchain_2026.2_generic`（run 38422866467）与 GPU `cuda_2026.2_P100`（run 38422948855）真实编译成功，CPU 冒烟硬门输出 `CP2K version 2026.2`，镜像 tag `cp2k/cp2k:2026.2_mpich_generic_psmp` 与 `cp2k/cp2k:2026.2_mpich_generic_cuda_P100_psmp`；验证口径为镜像构建 + `cp2k --version` 冒烟，未做科学计算正确性验证；V100 对 2026.2 为代码面支持、未进 CI。对上游 2026.2 布局的两处 deliberate workaround：dbcsr config 版本补丁（sed 行）与 openPMD OFF（旗标依据见 `generate.rs` 注释）
 - `mirror --restart` 在 Windows 上经 `cmd /C start` 重启 Docker Desktop，未做破坏性端到端验证
 - GitHub Actions 侧的 buildcache restore 偶发 miss（GitHub cache 服务 v2 索引问题，社区 #1710/#1694/#1735；已加 restore 重试 + artifact 跨 run 主通道缓解）——本机 cache mount 路径不受影响

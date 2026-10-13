@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Added（第七期 CP2K 2026.2）
+
+- **CP2K 2026.2 toolchain 支持**：版本注册 2026.2（toolchain 合成两条：generic none / generic P100，psmp 变体；CLI 默认版本仍为 2026.1）；release 构建新增 **release-cmake 臂**——上游 ≥2026.1 已删除根 Makefile，走 `cmake -GNinja` 构建（EVERYTHING=ON + DLAF/PEXSI/DEEPMD/LIBTORCH OFF 共用基础旗标集）；CUDA 侧新增 cmake 三旗标（`-DCP2K_USE_ACCEL=CUDA -DCP2K_WITH_GPU=<GPU> -DCMAKE_CUDA_ARCHITECTURES=<sm>`，P100→60 / V100→70），P100/V100 变体对 2026.2 可用
+- 新增 `--generate-only` 模式：跳过 docker 检查与确认提示，仅解析/生成 Dockerfile 并打印路径摘要（exit 0），未置位时默认行为零变化
+- `E2E image build` workflow 新增两 dispatch 变体（`toolchain_2026.2_generic` / `cuda_2026.2_P100`）：2026-10-13 双变体 CI 真实编译成功（CPU 冒烟硬门输出 `CP2K version 2026.2`；镜像 `cp2k/cp2k:2026.2_mpich_generic_psmp` 与 `cp2k/cp2k:2026.2_mpich_generic_cuda_P100_psmp`；run 38422866467 / 38422948855）
+
+### Fixed（第七期）
+
+- **dbcsr config 版本补丁**：release-cmake 臂内以 sed 修正 tarball 构建产出的 `DBCSRConfigVersion.cmake`——其 `git describe` 爬到外层 cp2k tag，产生畸形版本串 `2026.2.v2026.2v2026.2`，被 SameMajorVersion 语义拒绝导致 `find_package(DBCSR 2.8)` 失败（probe run 38393254283 实证）
+- **openPMD OFF**（失败迭代如实记录：e2e 第 1 轮 runs 38404980161 / 38405057080 双变体同点 FAIL 于 `find_package(openPMD 0.16.1 REQUIRED)`，dbcsr 补丁在该轮已验证生效）：toolchain `--install-all` 依赖集不含 openPMD，经 41 项组件对照矩阵确认其为唯一额外 OFF，追加 `-DCP2K_USE_OPENPMD=OFF` 后第 2 轮双变体 success
+
+### Documented（第七期）
+
+- README：版本行与构建方法节补 2026.2（toolchain 的 cmake 构建路径、CUDA 变体可用性）；已知限制新增两条——spack 方法暂不支持 2026.2（上游 tools/spack 重排，backlog=委托上游 make_cp2k.sh）与 2026.2 CI 验证状态（构建 + `--version` 冒烟口径，两处 deliberate workaround 登记）
+
 ### Added（第六期 CI 根治 + native 参数化）
 
 - **buildcache CI 侧根治**：搬运介质从 actions/cache（v2 索引间歇 miss）换为 **artifact 跨 run 主通道**（download-artifact run-id + actions:read；cache 链降级为 artifact miss 时的条件 fallback）——CI 复用轮实测 **107/107 依赖包从 binary cache 命中安装、零源码编译**，locate 跨 run 定位 `hit=true`
