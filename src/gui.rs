@@ -461,10 +461,7 @@ impl Forge2kApp {
                 .collect()
         };
         let versions: Vec<String> = if self.method == "native" {
-            vec!["master", "2026.1", "2026.2", "2025.2", "2024.3"]
-                .into_iter()
-                .map(String::from)
-                .collect()
+            native_version_list()
         } else {
             let mut vs: Vec<String> = docker_configs.iter().map(|c| c.version.clone()).collect();
             vs.sort();
@@ -1147,6 +1144,25 @@ impl Forge2kApp {
             );
         });
     }
+}
+
+// ============================================================
+// Native version advertisement
+// ============================================================
+
+/// Versions the native method advertises in its picker.
+///
+/// 2026.2 is intentionally absent: upstream deleted the root Makefile in
+/// v2026.1 and the native release arm still builds via `make`, so a 2026.2
+/// selection could never succeed (cmake migration is backlog). "2026.1" is
+/// a baseline legacy entry with the same defect — kept for now, tracked in
+/// the README known-limitations backlog. `master` stays: the native arm
+/// uses cmake for it.
+pub(crate) fn native_version_list() -> Vec<String> {
+    ["master", "2026.1", "2025.2", "2024.3"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 // ============================================================

@@ -2057,3 +2057,33 @@ fn t_wave3_master_and_make_arms_render_no_openpmd_off() {
         );
     }
 }
+
+// --------------------------------------------------------
+// Review followup: native 2026.2 advertisement removal
+// --------------------------------------------------------
+//
+// Adversarial review (verdict=confirmed): gui.rs's native version list
+// advertised 2026.2, but the native release arm in execute.rs still builds
+// via `make` (its use_cmake predicate only covers master) and upstream
+// deleted the root Makefile in v2026.1 — every `make` on a 2026.x tree
+// fails. The advertisement surface is dropped; the native cmake migration
+// itself stays backlog (not part of this fix).
+
+#[test]
+fn t_review_native_advertised_versions_exclude_2026_2() {
+    let vs = crate::gui::native_version_list();
+    assert!(
+        !vs.iter().any(|v| v == "2026.2"),
+        "review followup: native version list must not advertise 2026.2 \
+         (no root Makefile upstream, native release arm is make), got: {:?}",
+        vs
+    );
+    // The toolchain context keeps its 2026.2 support untouched (this
+    // branch's deliverable): sanity-pin that the version still renders
+    // through the release-cmake arm so the fix cannot "fix" by amputation.
+    let c = base_config("toolchain", "2026.2", "mpich", "generic", "none", "psmp");
+    assert!(
+        generate_dockerfile_content(&c).is_ok(),
+        "review followup: toolchain 2026.2 render must stay available"
+    );
+}

@@ -156,7 +156,8 @@ CI（`.github/workflows/ci.yml`）在 push 与 PR 时于 ubuntu / windows 双平
 - native 构建的 MPI 锁定 system mpich、variant 锁定 psmp（master 分支 + CUDA 组合显式拒绝）；已在 GitHub Actions ubuntu runner 验证 x86_64/generic 两组合全链路（含 `--version` 冒烟），CUDA 两组合构建面支持但未经镜像级验证（runner 无 NVIDIA 驱动/CUDA toolkit，backlog）
 - CUDA P100/V100 变体已在 GitHub Actions 完成全量构建验证（2026-09-29，均成功）；容器内 `cp2k --version` 需 NVIDIA 驱动（无 GPU 主机因缺 libcuda.so.1 无法运行，属环境边界非镜像缺陷）
 - 2026.1 / 2026.2 / master 走 synthesized 合成路径（见上）
-- spack 方法暂不支持 2026.2：上游 support/v2026.2 已重排 `tools/spack`（`cp2k_dev_repo` → `spack_repo/cp2k_dev`、deps yaml 改名 `cp2k_deps_p.yaml`、spack 包本体已从上游 tools/spack 仓库移除），现有 spack 模板引用失效——backlog 为委托上游 `make_cp2k.sh` 路径，当前 2026.2 仅 toolchain 方法可用
+- spack 方法暂不支持 2026.2：上游 support/v2026.2 已重排 `tools/spack`（`cp2k_dev_repo` → `spack_repo/cp2k_dev`、deps yaml 改名 `cp2k_deps_p.yaml`、spack 包本体已从上游 tools/spack 仓库移除），现有 spack 模板引用失效——CLI 的 `--generate-only` 仍可合成 spack 2026.2 Dockerfile（不硬挡），但实际 `docker build` 必败；backlog 为委托上游 `make_cp2k.sh` 路径，当前 2026.2 仅 toolchain 方法可用
+- native 方法对 ≥2026.1 的 cmake 迁移与 2026.1 广告遗留问题为已知 backlog（GUI 广告面已在 2026.2 摘除）
 - 2026.2 CI 验证状态（2026-10-13）：e2e 双变体 CPU `toolchain_2026.2_generic`（run 38422866467）与 GPU `cuda_2026.2_P100`（run 38422948855）真实编译成功，CPU 冒烟硬门输出 `CP2K version 2026.2`，镜像 tag `cp2k/cp2k:2026.2_mpich_generic_psmp` 与 `cp2k/cp2k:2026.2_mpich_generic_cuda_P100_psmp`；验证口径为镜像构建 + `cp2k --version` 冒烟，未做科学计算正确性验证；V100 对 2026.2 为代码面支持、未进 CI。对上游 2026.2 布局的两处 deliberate workaround：dbcsr config 版本补丁（sed 行）与 openPMD OFF（旗标依据见 `generate.rs` 注释）
 - `mirror --restart` 在 Windows 上经 `cmd /C start` 重启 Docker Desktop，未做破坏性端到端验证
 - GitHub Actions 侧的 buildcache restore 偶发 miss（GitHub cache 服务 v2 索引问题，社区 #1710/#1694/#1735；已加 restore 重试 + artifact 跨 run 主通道缓解）——本机 cache mount 路径不受影响

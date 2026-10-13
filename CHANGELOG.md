@@ -14,6 +14,7 @@
 
 - **dbcsr config 版本补丁**：release-cmake 臂内以 sed 修正 tarball 构建产出的 `DBCSRConfigVersion.cmake`——其 `git describe` 爬到外层 cp2k tag，产生畸形版本串 `2026.2.v2026.2v2026.2`，被 SameMajorVersion 语义拒绝导致 `find_package(DBCSR 2.8)` 失败（probe run 38393254283 实证）
 - **openPMD OFF**（失败迭代如实记录：e2e 第 1 轮 runs 38404980161 / 38405057080 双变体同点 FAIL 于 `find_package(openPMD 0.16.1 REQUIRED)`，dbcsr 补丁在该轮已验证生效）：toolchain `--install-all` 依赖集不含 openPMD，经 41 项组件对照矩阵确认其为唯一额外 OFF，追加 `-DCP2K_USE_OPENPMD=OFF` 后第 2 轮双变体 success
+- **native 2026.2 广告摘除**（对抗评审 verdict=confirmed followup）：GUI native 方法版本列表误含 2026.2，而 native release 臂仍走 `make`（`use_cmake` 仅覆盖 master）、上游 ≥2026.1 已删根 Makefile 必败，广告面与执行路径不一致——从 native 广告面移除 2026.2 并加负向断言锁定；native ≥2026.1 的 cmake 迁移与基线遗留的 2026.1 广告问题登记 backlog（README 已知限制）
 
 ### Documented（第七期）
 
