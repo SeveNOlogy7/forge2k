@@ -147,7 +147,7 @@ fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
     } else {
         String::new()
     };
-    let use_cmake = config.version == "master";
+    let use_cmake = toolchain_uses_cmake(&config.version);
     let git_clone = if config.version == "master" {
         canon_git_clone_block(&config.version, "master")
     } else {
@@ -155,35 +155,15 @@ fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
     };
 
     let build_step = if use_cmake {
-        // Master branch uses CMake + Ninja (arch file no longer exists)
-        r#"SHELL ["/bin/bash", "-c"]
-WORKDIR /opt/cp2k
-ENV TOOLCHAIN_DIR=/opt/cp2k/tools/toolchain
-RUN source ${TOOLCHAIN_DIR}/install/setup && \
-    cmake -GNinja \
-    -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
-    -DCP2K_USE_EVERYTHING=ON \
-    -DCP2K_USE_DLAF=OFF \
-    -DCP2K_USE_PEXSI=OFF \
-    -DCP2K_USE_DEEPMD=OFF \
-    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
-    -DCMAKE_C_FLAGS="-fno-lto" \
-    -DCMAKE_CXX_FLAGS="-fno-lto" \
-    -DCMAKE_Fortran_FLAGS="-fno-lto" \
-    -DCMAKE_EXE_LINKER_FLAGS="-fno-lto" \
-    -Werror=dev \
-    -B build -S . && \
-    ninja -C build -j ${NUM_PROCS:-8} && \
-    cmake --install build --prefix /opt/cp2k/install
-
-RUN mkdir -p /toolchain/install /toolchain/scripts && \
-    for d in /opt/cp2k/tools/toolchain/install/*/; do \
-        libdir=$(basename "$d"); \
-        cp -a "$d" /toolchain/install/; \
-    done && \
-    cp /opt/cp2k/tools/toolchain/install/setup /toolchain/install/ && \
-    cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#
-            .to_string()
+        if config.version == "master" {
+            // Master branch uses CMake + Ninja (arch file no longer exists)
+            MASTER_CMAKE_BUILD_STEP.to_string()
+        } else {
+            // Releases from v2026.1 on ship no root Makefile/arch trees
+            // either, so the same CMake arm runs with the release
+            // base-flag additions and the optional CUDA triple.
+            release_cmake_build_step(&config.cuda)
+        }
     } else {
         // Tagged releases use old make approach with arch files
         format!(
@@ -270,13 +250,115 @@ exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint
     ))
 }
 
-/// Wave 1 (red) stub: the cmake-vs-make predicate entry point exists so
-/// the 2026.2 capability tests compile, but it always answers false (the
-/// pre-2026 make path). Wave 2 replaces this body with the real boundary
-/// (`master` || version >= "2026.1" — upstream deleted the root Makefile
-/// in v2026.1) and wires the `use_cmake` call site to it. `#[cfg(test)]`
-/// until then, so non-test builds carry no dead code.
-#[cfg(test)]
-pub(crate) fn toolchain_uses_cmake(_version: &str) -> bool {
-    false
+/// The master-branch CMake build step, kept verbatim from the generator
+/// that predates the 2026.x arm: master renders byte-identical in every
+/// combination (pinned regression guard — the plan's non-goal forbids
+/// any change to master's existing synthesized behavior).
+const MASTER_CMAKE_BUILD_STEP: &str = r#"SHELL ["/bin/bash", "-c"]
+WORKDIR /opt/cp2k
+ENV TOOLCHAIN_DIR=/opt/cp2k/tools/toolchain
+RUN source ${TOOLCHAIN_DIR}/install/setup && \
+    cmake -GNinja \
+    -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
+    -DCP2K_USE_EVERYTHING=ON \
+    -DCP2K_USE_DLAF=OFF \
+    -DCP2K_USE_PEXSI=OFF \
+    -DCP2K_USE_DEEPMD=OFF \
+    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+    -DCMAKE_C_FLAGS="-fno-lto" \
+    -DCMAKE_CXX_FLAGS="-fno-lto" \
+    -DCMAKE_Fortran_FLAGS="-fno-lto" \
+    -DCMAKE_EXE_LINKER_FLAGS="-fno-lto" \
+    -Werror=dev \
+    -B build -S . && \
+    ninja -C build -j ${NUM_PROCS:-8} && \
+    cmake --install build --prefix /opt/cp2k/install
+
+RUN mkdir -p /toolchain/install /toolchain/scripts && \
+    for d in /opt/cp2k/tools/toolchain/install/*/; do \
+        libdir=$(basename "$d"); \
+        cp -a "$d" /toolchain/install/; \
+    done && \
+    cp /opt/cp2k/tools/toolchain/install/setup /toolchain/install/ && \
+    cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#;
+
+/// CUDA compute capability for a GPU model, per the upstream make_cp2k.sh
+/// GPU table (P100 -> sm_60, V100 -> sm_70, :434-449). Unknown models fall
+/// back to the P100 (sm_60) vector — the CI-tested default; the CLI value
+/// parser admits only none/P100/V100.
+fn cuda_sm_code(gpu: &str) -> &'static str {
+    match gpu {
+        "V100" => "70",
+        _ => "60",
+    }
+}
+
+/// CMake build step for releases >= 2026.1: the master CMake arm plus
+/// `-DCP2K_USE_LIBTORCH=OFF` in the shared base flag set. v2026.2's
+/// CMakeLists makes LIBTORCH follow CP2K_USE_EVERYTHING and the toolchain
+/// `--install-all` installs libtorch, so it is explicitly OFF for both the
+/// CPU and the GPU render (plan default 8) — no Torch_DIR runtime
+/// resolution is introduced because no Torch dependency remains. A
+/// `cuda` other than "none" additionally appends the upstream CUDA triple
+/// (`-DCP2K_USE_ACCEL=CUDA -DCP2K_WITH_GPU=<GPU>
+/// -DCMAKE_CUDA_ARCHITECTURES=<sm>`, make_cp2k.sh:898-901 with the
+/// P100/V100 sm table at :434-449). The pre-2026 make arm and master's
+/// step above are untouched by this builder.
+fn release_cmake_build_step(cuda: &str) -> String {
+    // The CUDA triple slots between the shared base flags and the
+    // IPO/LTO block; CPU renders (cuda == "none") leave it empty.
+    let cuda_flags = if cuda == "none" {
+        String::new()
+    } else {
+        format!(
+            "    -DCP2K_USE_ACCEL=CUDA \\\n    -DCP2K_WITH_GPU={} \\\n    -DCMAKE_CUDA_ARCHITECTURES={} \\\n",
+            cuda,
+            cuda_sm_code(cuda)
+        )
+    };
+    let mut step = String::from(
+        r#"SHELL ["/bin/bash", "-c"]
+WORKDIR /opt/cp2k
+ENV TOOLCHAIN_DIR=/opt/cp2k/tools/toolchain
+RUN source ${TOOLCHAIN_DIR}/install/setup && \
+    cmake -GNinja \
+    -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
+    -DCP2K_USE_EVERYTHING=ON \
+    -DCP2K_USE_DLAF=OFF \
+    -DCP2K_USE_PEXSI=OFF \
+    -DCP2K_USE_DEEPMD=OFF \
+    -DCP2K_USE_LIBTORCH=OFF \
+"#,
+    );
+    step.push_str(&cuda_flags);
+    step.push_str(
+        r#"    -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
+    -DCMAKE_C_FLAGS="-fno-lto" \
+    -DCMAKE_CXX_FLAGS="-fno-lto" \
+    -DCMAKE_Fortran_FLAGS="-fno-lto" \
+    -DCMAKE_EXE_LINKER_FLAGS="-fno-lto" \
+    -Werror=dev \
+    -B build -S . && \
+    ninja -C build -j ${NUM_PROCS:-8} && \
+    cmake --install build --prefix /opt/cp2k/install
+
+RUN mkdir -p /toolchain/install /toolchain/scripts && \
+    for d in /opt/cp2k/tools/toolchain/install/*/; do \
+        libdir=$(basename "$d"); \
+        cp -a "$d" /toolchain/install/; \
+    done && \
+    cp /opt/cp2k/tools/toolchain/install/setup /toolchain/install/ && \
+    cp /opt/cp2k/tools/toolchain/scripts/tool_kit.sh /toolchain/scripts"#,
+    );
+    step
+}
+
+/// Whether the toolchain build path must use the CMake arm (`true`) or
+/// the legacy make+arch-file arm (`false`): `master` and every release
+/// from v2026.1 on deleted the root Makefile/arch trees upstream (v2025.2
+/// is the last release still shipping them), so the boundary is
+/// `master || version >= "2026.1"`. String comparison; plan risk 10 pins
+/// the boundary semantics by unit test.
+pub(crate) fn toolchain_uses_cmake(version: &str) -> bool {
+    version == "master" || version >= "2026.1"
 }
