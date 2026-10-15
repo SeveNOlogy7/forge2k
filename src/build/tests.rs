@@ -2396,3 +2396,285 @@ fn t_feat_registry_single_source() {
         );
     }
 }
+
+// ---- stage 2: the release-cmake feature fork renders ----
+
+/// §f.1: the 2026.2 CPU render with `deepmd` must flip the pair to ON,
+/// carry both config guards between the dbcsr sed and the cmake call, keep
+/// the base-flag order, and leave no template placeholder behind.
+#[test]
+fn t_feat_deepmd_release_cmake_flags() {
+    let c = base_config_features(
+        "toolchain",
+        "2026.2",
+        "mpich",
+        "generic",
+        "none",
+        "psmp",
+        &["deepmd"],
+    );
+    let content = generate_dockerfile_content(&c).expect("render deepmd release-cmake arm");
+
+    const REQUIRED: [&str; 5] = [
+        "-DCP2K_USE_DEEPMD=ON",
+        "-DCP2K_USE_LIBTORCH=ON",
+        "TorchConfig.cmake",
+        "DeePMDConfig.cmake",
+        "-DCP2K_DATA_DIR=/opt/cp2k/data",
+    ];
+    let mut missing: Vec<&str> = Vec::new();
+    for marker in REQUIRED {
+        if !content.contains(marker) {
+            missing.push(marker);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "T-FEAT: the deepmd release-cmake render must carry the ON pair plus both config guards, missing: {:?}",
+        missing
+    );
+
+    for forbidden in ["-DCP2K_USE_DEEPMD=OFF", "-DCP2K_USE_LIBTORCH=OFF"] {
+        assert!(
+            !content.contains(forbidden),
+            "T-FEAT: the deepmd render must not keep the OFF form {forbidden}"
+        );
+    }
+
+    // base-flag order invariant (§c): PEXSI < DEEPMD < LIBTORCH < OPENPMD < IPO
+    let pexsi_at = content
+        .find("-DCP2K_USE_PEXSI=OFF")
+        .expect("T-FEAT: release-cmake render must carry PEXSI=OFF");
+    let deepmd_at = content
+        .find("-DCP2K_USE_DEEPMD=ON")
+        .expect("T-FEAT: DEEPMD=ON located above must be a substring");
+    let libtorch_at = content
+        .find("-DCP2K_USE_LIBTORCH=ON")
+        .expect("T-FEAT: LIBTORCH=ON located above must be a substring");
+    let openpmd_at = content
+        .find("-DCP2K_USE_OPENPMD=OFF")
+        .expect("T-FEAT: release-cmake render must carry OPENPMD=OFF");
+    let ipo_at = content
+        .find("-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF")
+        .expect("T-FEAT: release-cmake render must carry the IPO OFF flag");
+    assert!(
+        pexsi_at < deepmd_at && deepmd_at < libtorch_at && libtorch_at < openpmd_at && openpmd_at < ipo_at,
+        "T-FEAT: the ON pair must replace the OFF pair in place (PEXSI {pexsi_at} < DEEPMD {deepmd_at} < LIBTORCH {libtorch_at} < OPENPMD {openpmd_at} < IPO {ipo_at})"
+    );
+
+    // guard placement (§d): after the dbcsr sed, before `cmake -GNinja`,
+    // each guard continued into the RUN chain with `&& \`
+    let sed_at = content
+        .find("DBCSRConfigVersion.cmake")
+        .expect("T-FEAT: release-cmake render must carry the dbcsr sed");
+    let torch_guard_at = content
+        .find("TorchConfig.cmake")
+        .expect("T-FEAT: TorchConfig guard located above must be a substring");
+    let deepmd_guard_at = content
+        .find("DeePMDConfig.cmake")
+        .expect("T-FEAT: DeePMDConfig guard located above must be a substring");
+    let cmake_at = content
+        .find("cmake -GNinja")
+        .expect("T-FEAT: release-cmake render must call cmake");
+    assert!(
+        sed_at < torch_guard_at && torch_guard_at < deepmd_guard_at && deepmd_guard_at < cmake_at,
+        "T-FEAT: the guards must sit between the dbcsr sed ({sed_at}) and the cmake call ({cmake_at}), got Torch at {torch_guard_at}, DeePMD at {deepmd_guard_at}"
+    );
+    for needle in ["TorchConfig.cmake", "DeePMDConfig.cmake"] {
+        let line = line_containing(&content, needle, "deepmd config guard");
+        assert!(
+            line.trim_start().starts_with("test -n") && line.ends_with("&& \\"),
+            "T-FEAT: the {needle} guard must be a `test -n ... && \\` RUN segment, got: {line}"
+        );
+    }
+
+    assert!(
+        !content.contains("{{"),
+        "T-FEAT: no template placeholder may survive rendering (deepmd):\n{content}"
+    );
+}
+
+/// §f.1: the GPU render keeps the CUDA triple in its slot (between the
+/// OPENPMD OFF and the IPO block) while both feature flags are ON.
+#[test]
+fn t_feat_deepmd_gpu_render_flags() {
+    let c = base_config_features(
+        "toolchain",
+        "2026.2",
+        "mpich",
+        "generic",
+        "P100",
+        "psmp",
+        &["deepmd"],
+    );
+    let content = generate_dockerfile_content(&c).expect("render deepmd release-cmake GPU arm");
+
+    for marker in [
+        "-DCP2K_USE_DEEPMD=ON",
+        "-DCP2K_USE_LIBTORCH=ON",
+        "TorchConfig.cmake",
+        "DeePMDConfig.cmake",
+    ] {
+        assert!(
+            content.contains(marker),
+            "T-FEAT: the deepmd GPU render must carry {marker}"
+        );
+    }
+
+    let openpmd_at = content
+        .find("-DCP2K_USE_OPENPMD=OFF")
+        .expect("T-FEAT: GPU release-cmake render must carry OPENPMD=OFF");
+    let accel_at = content
+        .find("-DCP2K_USE_ACCEL=CUDA")
+        .expect("T-FEAT: GPU render must carry the CUDA accel flag");
+    let ipo_at = content
+        .find("-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF")
+        .expect("T-FEAT: GPU render must carry the IPO OFF flag");
+    assert!(
+        openpmd_at < accel_at && accel_at < ipo_at,
+        "T-FEAT: the CUDA triple must keep its slot between OPENPMD OFF ({openpmd_at}) and IPO ({ipo_at}), found at {accel_at}"
+    );
+
+    assert!(
+        !content.contains("{{"),
+        "T-FEAT: no template placeholder may survive rendering (deepmd GPU):\n{content}"
+    );
+}
+
+/// §f.1 / §i: with empty features every arm must stay free of feature
+/// markers while keeping its own baseline flag surface — the red-proof of
+/// "zero change without --features".
+#[test]
+fn t_feat_no_features_render_byte_identical() {
+    // (method, version, cuda, what, required baseline markers)
+    let arms: [(&str, &str, &str, &str, &[&str]); 5] = [
+        (
+            "toolchain",
+            "master",
+            "none",
+            "master cmake arm",
+            &[
+                "cmake -GNinja",
+                "-DCP2K_USE_DEEPMD=OFF",
+                "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
+            ],
+        ),
+        (
+            "toolchain",
+            "2026.2",
+            "none",
+            "2026.2 release-cmake CPU arm",
+            &[
+                "cmake -GNinja",
+                "-DCP2K_USE_EVERYTHING=ON",
+                "-DCP2K_USE_DLAF=OFF",
+                "-DCP2K_USE_PEXSI=OFF",
+                "-DCP2K_USE_DEEPMD=OFF",
+                "-DCP2K_USE_LIBTORCH=OFF",
+                "-DCP2K_USE_OPENPMD=OFF",
+                "-DCP2K_DATA_DIR=/opt/cp2k/data",
+            ],
+        ),
+        (
+            "toolchain",
+            "2026.2",
+            "P100",
+            "2026.2 release-cmake GPU arm",
+            &[
+                "cmake -GNinja",
+                "-DCP2K_USE_LIBTORCH=OFF",
+                "-DCP2K_USE_ACCEL=CUDA",
+                "-DCP2K_WITH_GPU=P100",
+                "-DCMAKE_CUDA_ARCHITECTURES=60",
+            ],
+        ),
+        (
+            "toolchain",
+            "2023.2",
+            "none",
+            "2023.2 make arm",
+            &["make -j", "cp2k.psmp"],
+        ),
+        (
+            "spack",
+            "2025.2",
+            "none",
+            "spack arm",
+            &[
+                "FROM ubuntu:24.04 AS build_cp2k",
+                "-b \"$REF\" https://github.com/cp2k/cp2k.git",
+            ],
+        ),
+    ];
+
+    for (method, version, cuda, what, required) in arms {
+        let c = base_config_features(method, version, "mpich", "generic", cuda, "psmp", &[]);
+        let content = generate_dockerfile_content(&c).expect("render feature-free arm");
+
+        for forbidden in [
+            "-DCP2K_USE_DEEPMD=ON",
+            "-DCP2K_USE_LIBTORCH=ON",
+            "TorchConfig.cmake",
+            "DeePMDConfig.cmake",
+        ] {
+            assert!(
+                !content.contains(forbidden),
+                "T-FEAT: the feature-free {what} render must not carry {forbidden}"
+            );
+        }
+
+        let mut missing: Vec<&str> = Vec::new();
+        for marker in required {
+            if !content.contains(marker) {
+                missing.push(marker);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "T-FEAT: the feature-free {what} render must keep its baseline markers, missing: {:?}",
+            missing
+        );
+    }
+}
+
+/// §f.1 / §e: the bundled-lookup filename stays feature-free (the 4/5/6
+/// field parse shape must not be polluted); feature configs therefore always
+/// synthesize, and a feature-free config named the same stays bundled-eligible.
+#[test]
+fn t_feat_dockerfile_name_and_lookup_unchanged() {
+    let plain = base_config("toolchain", "2026.2", "mpich", "generic", "none", "psmp");
+    let feat = base_config_features(
+        "toolchain",
+        "2026.2",
+        "mpich",
+        "generic",
+        "none",
+        "psmp",
+        &["deepmd"],
+    );
+    assert_eq!(
+        plain.dockerfile_name(),
+        feat.dockerfile_name(),
+        "T-FEAT: dockerfile_name() must not gain a features segment"
+    );
+    assert_eq!(
+        feat.dockerfile_name(),
+        "toolchain/2026.2_mpich_generic_psmp.Dockerfile",
+        "T-FEAT: the lookup name must keep the pre-feature shape"
+    );
+
+    let path = feat
+        .resolve_dockerfile()
+        .expect("T-FEAT: a feature config must synthesize its Dockerfile");
+    let content = std::fs::read_to_string(&path).expect("read synthesized feature Dockerfile");
+    assert!(
+        content.contains("-DCP2K_USE_DEEPMD=ON"),
+        "T-FEAT: the synthesized feature Dockerfile must carry the deepmd ON flag"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        !path.exists(),
+        "T-FEAT: the generated feature Dockerfile must be cleaned up"
+    );
+}

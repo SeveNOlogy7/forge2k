@@ -221,7 +221,7 @@ fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
             // Releases from v2026.1 on ship no root Makefile/arch trees
             // either, so the same CMake arm runs with the release
             // base-flag additions and the optional CUDA triple.
-            release_cmake_build_step(&config.cuda)
+            release_cmake_build_step(&config.cuda, &config.features)
         }
     } else {
         // Tagged releases use old make approach with arch files
@@ -352,18 +352,33 @@ fn cuda_sm_code(gpu: &str) -> &'static str {
     }
 }
 
+/// Config-existence guards rendered by the `deepmd` feature preset: inserted
+/// as `&& \` RUN segments between the dbcsr sed and the cmake call (§d of
+/// the preset spec). They are drift detectors, not locators: the toolchain
+/// `install/setup` exports CMAKE_PREFIX_PATH for both packages, so a missing
+/// `*Config.cmake` means the `--install-all` set changed and the build must
+/// fail here with an explicit message instead of deep inside
+/// `find_package(... REQUIRED)`. `find -print -quit` returns 0 with empty
+/// output on a miss, so `test -n` carries the verdict.
+const FEATURE_CONFIG_GUARDS: &str = r#"    test -n "$(find "${TOOLCHAIN_DIR}/install" -maxdepth 6 ! -type l -name TorchConfig.cmake -print -quit)" || { echo "ERROR: TorchConfig.cmake not found under ${TOOLCHAIN_DIR}/install; the setup-exported CMAKE_PREFIX_PATH cannot resolve Torch (toolchain --install-all drift)" >&2; exit 1; } && \
+    test -n "$(find "${TOOLCHAIN_DIR}/install" -maxdepth 6 ! -type l -name DeePMDConfig.cmake -print -quit)" || { echo "ERROR: DeePMDConfig.cmake not found under ${TOOLCHAIN_DIR}/install; find_package(DeePMD REQUIRED CONFIG) cannot resolve (toolchain --install-all drift)" >&2; exit 1; } && \
+"#;
+
 /// CMake build step for releases >= 2026.1: the master CMake arm plus
 /// `-DCP2K_USE_LIBTORCH=OFF` in the shared base flag set. v2026.2's
 /// CMakeLists makes LIBTORCH follow CP2K_USE_EVERYTHING and the toolchain
 /// `--install-all` installs libtorch, so it is explicitly OFF for both the
 /// CPU and the GPU render (plan default 8) — no Torch_DIR runtime
-/// resolution is introduced because no Torch dependency remains. A
-/// `cuda` other than "none" additionally appends the upstream CUDA triple
-/// (`-DCP2K_USE_ACCEL=CUDA -DCP2K_WITH_GPU=<GPU>
+/// resolution is introduced because no Torch dependency remains. The
+/// `deepmd` feature preset (`--features deepmd`) flips DEEPMD and LIBTORCH
+/// to ON in place — upstream binds the pair (make_cp2k.sh:305-311) — and
+/// inserts the two config guards; with an empty feature list the rendered
+/// bytes are unchanged. A `cuda` other than "none" additionally appends the
+/// upstream CUDA triple (`-DCP2K_USE_ACCEL=CUDA -DCP2K_WITH_GPU=<GPU>
 /// -DCMAKE_CUDA_ARCHITECTURES=<sm>`, make_cp2k.sh:898-901 with the
 /// P100/V100 sm table at :434-449). The pre-2026 make arm and master's
 /// step above are untouched by this builder.
-fn release_cmake_build_step(cuda: &str) -> String {
+fn release_cmake_build_step(cuda: &str, features: &[String]) -> String {
     // The CUDA triple slots between the shared base flags and the
     // IPO/LTO block; CPU renders (cuda == "none") leave it empty.
     let cuda_flags = if cuda == "none" {
@@ -386,20 +401,29 @@ fn release_cmake_build_step(cuda: &str) -> String {
     // share path instead of the path this Dockerfile itself ships via
     // `COPY --from=build /opt/cp2k/data/` (both arms). The pin also makes
     // the ci/cp2k-tests H2O suite's no-env contract the exact runtime path.
-    let mut step = String::from(
+    // Feature preset (`--features`): deepmd flips the pair to ON. Upstream
+    // binds the two — `--enable deepmd` implies `-DCP2K_USE_LIBTORCH=ON`
+    // (make_cp2k.sh:305-311) — and both install trees already ship in the
+    // toolchain `--install-all` set, so the pair moves together. With no
+    // features both flags stay OFF: the rendered bytes stay unchanged.
+    let deepmd = features.iter().any(|f| f == "deepmd");
+    let (deepmd_flag, libtorch_flag) = if deepmd { ("ON", "ON") } else { ("OFF", "OFF") };
+    let guards = if deepmd { FEATURE_CONFIG_GUARDS } else { "" };
+
+    let mut step = format!(
         r#"SHELL ["/bin/bash", "-c"]
 WORKDIR /opt/cp2k
 ENV TOOLCHAIN_DIR=/opt/cp2k/tools/toolchain
-RUN source ${TOOLCHAIN_DIR}/install/setup && \
+RUN source ${{TOOLCHAIN_DIR}}/install/setup && \
     sed -i 's/set(PACKAGE_VERSION "[^"]*")/set(PACKAGE_VERSION "2.10.0")/' tools/toolchain/install/dbcsr-*/lib*/cmake/dbcsr/DBCSRConfigVersion.cmake && \
-    cmake -GNinja \
+{guards}    cmake -GNinja \
     -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
     -DCP2K_DATA_DIR=/opt/cp2k/data \
     -DCP2K_USE_EVERYTHING=ON \
     -DCP2K_USE_DLAF=OFF \
     -DCP2K_USE_PEXSI=OFF \
-    -DCP2K_USE_DEEPMD=OFF \
-    -DCP2K_USE_LIBTORCH=OFF \
+    -DCP2K_USE_DEEPMD={deepmd_flag} \
+    -DCP2K_USE_LIBTORCH={libtorch_flag} \
     -DCP2K_USE_OPENPMD=OFF \
 "#,
     );
