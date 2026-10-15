@@ -37,6 +37,16 @@ pub(crate) use execute::{run_cmd_logged, CmdStatus};
 #[cfg(test)]
 pub(crate) use generate::generate_dockerfile_content;
 
+// Feature-preset API: the CLI (`--features`) and the generator share the
+// registry in `generate.rs` as the single source of truth.
+pub(crate) use generate::{validate_feature_arm, validate_features, KNOWN_FEATURES};
+
+// Test-only interior of the feature-preset API: the arm predicate is
+// consumed by `validate_feature_arm` inside generate.rs; the tests pin its
+// boundary directly.
+#[cfg(test)]
+pub(crate) use generate::features_supported_arm;
+
 // ============================================================
 // Build Outcome
 // ============================================================
@@ -68,6 +78,9 @@ pub struct BuildConfig {
     pub no_cache: bool,
     pub shm_size: String,
     pub dockerfile: Option<PathBuf>,
+    /// Validated feature presets (`--features`), canonical registry order.
+    /// Empty = pre-feature behavior (renders byte-identical).
+    pub features: Vec<String>,
 }
 
 impl BuildConfig {
@@ -86,9 +99,14 @@ impl BuildConfig {
         } else {
             self.version.clone()
         };
+        let feature_suffix = if self.features.is_empty() {
+            String::new()
+        } else {
+            format!("_{}", self.features.join("_"))
+        };
         format!(
-            "cp2k/cp2k:{}_{}_{}{}_{}",
-            ver, self.mpi, self.cpu, cuda_suffix, self.variant
+            "cp2k/cp2k:{}_{}_{}{}_{}{}",
+            ver, self.mpi, self.cpu, cuda_suffix, self.variant, feature_suffix
         )
     }
 
@@ -96,13 +114,21 @@ impl BuildConfig {
     pub fn resolve_dockerfile(&self) -> Result<PathBuf> {
         if let Some(ref df) = self.dockerfile {
             if df.exists() {
+                if !self.features.is_empty() {
+                    return Err(anyhow!("--features cannot be combined with an explicit Dockerfile (-f/--dockerfile): feature presets only affect the synthesized Dockerfile"));
+                }
                 return Ok(df.clone());
             }
             return Err(anyhow!("Custom Dockerfile not found: {}", df.display()));
         }
 
-        if let Some(path) = self.find_bundled_dockerfile() {
-            return Ok(path);
+        // Feature presets change the synthesized build step; a bundled
+        // Dockerfile for the same (method, version, mpi, cpu, cuda, variant)
+        // would silently drop them, so features always synthesize.
+        if self.features.is_empty() {
+            if let Some(path) = self.find_bundled_dockerfile() {
+                return Ok(path);
+            }
         }
 
         // If no bundled file found, we'll generate one at runtime

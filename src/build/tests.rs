@@ -29,7 +29,23 @@ fn base_config(
         no_cache: false,
         shm_size: "1g".to_string(),
         dockerfile: None,
+        features: Vec::new(),
     }
+}
+
+/// [`base_config`] plus a `--features` list (spec §f.1).
+fn base_config_features(
+    method: &str,
+    version: &str,
+    mpi: &str,
+    cpu: &str,
+    cuda: &str,
+    variant: &str,
+    features: &[&str],
+) -> BuildConfig {
+    let mut c = base_config(method, version, mpi, cpu, cuda, variant);
+    c.features = features.iter().map(|f| f.to_string()).collect();
+    c
 }
 
 /// Serializes every test that spawns child processes or mutates PATH.
@@ -2164,6 +2180,219 @@ fn t_ci_h2o_master_make_and_spack_render_no_data_dir_pin() {
         assert!(
             !content.contains("CP2K_DATA_DIR"),
             "T-CIH2O: the {what} render must stay free of the data-dir pin (pinned regression guard)"
+        );
+    }
+}
+
+// --------------------------------------------------------
+// Wave feature-presets: `--features` + the first preset, deepmd
+// --------------------------------------------------------
+//
+// Spec: `.omz/.../results/preset-design-spec.md` §a-§f. `--features deepmd`
+// flips the release-cmake arm's DEEPMD/LIBTORCH pair to ON (upstream
+// make_cp2k.sh:305-311 binds the two: --enable deepmd implies libtorch) and
+// inserts two config-existence guards between the dbcsr sed and the cmake
+// call (§d). The toolchain `install/setup` already exports CMAKE_PREFIX_PATH
+// for both packages, so no Torch_DIR/DeePMD_DIR line is added (§1.1). Every
+// other arm rejects non-empty features fail-loud (§a), and the
+// empty-features render stays byte-identical (§e, §i).
+
+// ---- stage 1: CLI, BuildConfig, tag and validation ----
+
+/// §f.1 / §a: the generator-layer validator is the authoritative unknown
+/// feature gate (covers GUI/programmatic callers past the CLI layer).
+#[test]
+fn t_feat_unknown_feature_fails_loud() {
+    let err = validate_features(&["nope".to_string()])
+        .expect_err("T-FEAT: an unknown feature must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown feature 'nope'"),
+        "T-FEAT: the unknown-feature error must name the value, got: {msg}"
+    );
+    assert!(
+        msg.contains("deepmd"),
+        "T-FEAT: the unknown-feature error must list the known features, got: {msg}"
+    );
+}
+
+/// §f.1 / §a: clap does not deduplicate a comma list, so the generator
+/// layer rejects duplicates with its own error (文案 2).
+#[test]
+fn t_feat_duplicate_feature_rejected() {
+    let err = validate_features(&["deepmd".to_string(), "deepmd".to_string()])
+        .expect_err("T-FEAT: a duplicate feature must be rejected");
+    assert!(
+        err.to_string().contains("duplicate feature 'deepmd'"),
+        "T-FEAT: the duplicate-feature error must name the value, got: {}",
+        err
+    );
+}
+
+/// §f.1 / §a: features are release-cmake-arm-only. The four rejected arms
+/// must fail loud with the arm error; the three supported toolchain
+/// versions must render Ok.
+#[test]
+fn t_feat_arm_rejection_matrix() {
+    for (method, version) in [
+        ("spack", "2026.2"),
+        ("toolchain", "2025.2"),
+        ("toolchain", "2023.2"),
+        ("toolchain", "master"),
+    ] {
+        let c = base_config_features(
+            method,
+            version,
+            "mpich",
+            "generic",
+            "none",
+            "psmp",
+            &["deepmd"],
+        );
+        let err = generate_dockerfile_content(&c)
+            .expect_err("T-FEAT: features on an unsupported arm must fail loud");
+        assert!(
+            err.to_string().contains("release-cmake build arm"),
+            "T-FEAT: the arm error for ({method}, {version}) must name the release-cmake arm, got: {err}"
+        );
+        assert!(
+            !features_supported_arm(method, version),
+            "T-FEAT: features_supported_arm({method}, {version}) must be false"
+        );
+    }
+
+    for version in ["2026.1", "2026.2", "2027.0"] {
+        assert!(
+            features_supported_arm("toolchain", version),
+            "T-FEAT: features_supported_arm(toolchain, {version}) must be true"
+        );
+        let c = base_config_features(
+            "toolchain",
+            version,
+            "mpich",
+            "generic",
+            "none",
+            "psmp",
+            &["deepmd"],
+        );
+        assert!(
+            generate_dockerfile_content(&c).is_ok(),
+            "T-FEAT: the release-cmake arm must render with features (version {version})"
+        );
+    }
+}
+
+/// §f.1 / §e: tag = existing tag + `_<feature>`; empty list leaves the tag
+/// byte-identical; an explicit -t/--tag still wins.
+#[test]
+fn t_feat_tag_suffix() {
+    let plain = base_config_features(
+        "toolchain",
+        "2026.2",
+        "mpich",
+        "generic",
+        "none",
+        "psmp",
+        &[],
+    );
+    assert_eq!(
+        plain.default_tag(),
+        "cp2k/cp2k:2026.2_mpich_generic_psmp",
+        "T-FEAT: the empty-features tag must stay byte-identical to the pre-feature rule"
+    );
+
+    let deepmd = base_config_features(
+        "toolchain",
+        "2026.2",
+        "mpich",
+        "generic",
+        "none",
+        "psmp",
+        &["deepmd"],
+    );
+    assert_eq!(
+        deepmd.default_tag(),
+        "cp2k/cp2k:2026.2_mpich_generic_psmp_deepmd",
+        "T-FEAT: the deepmd tag must append the _deepmd suffix"
+    );
+
+    let gpu = base_config_features(
+        "toolchain",
+        "2026.2",
+        "mpich",
+        "generic",
+        "P100",
+        "psmp",
+        &["deepmd"],
+    );
+    assert_eq!(
+        gpu.default_tag(),
+        "cp2k/cp2k:2026.2_mpich_generic_cuda_P100_psmp_deepmd",
+        "T-FEAT: the GPU deepmd tag must place the suffix last"
+    );
+
+    let mut tagged = base_config_features(
+        "toolchain",
+        "2026.2",
+        "mpich",
+        "generic",
+        "none",
+        "psmp",
+        &["deepmd"],
+    );
+    tagged.tag = "x".to_string();
+    assert_eq!(
+        tagged.default_tag(),
+        "x",
+        "T-FEAT: an explicit --tag must still override the synthesized tag"
+    );
+}
+
+/// §f.1 / §e: `--features` + an explicit -f/--dockerfile is rejected —
+/// feature presets only affect the synthesized Dockerfile (文案 4).
+#[test]
+fn t_feat_dockerfile_conflict_rejected() {
+    let guard = TempGuard::new("feat_conflict");
+    let custom = guard.0.join("custom.Dockerfile");
+    std::fs::write(&custom, "FROM scratch\n").expect("write temp custom Dockerfile");
+
+    let mut c = base_config_features(
+        "toolchain",
+        "2026.2",
+        "mpich",
+        "generic",
+        "none",
+        "psmp",
+        &["deepmd"],
+    );
+    c.dockerfile = Some(custom);
+
+    let err = c
+        .resolve_dockerfile()
+        .expect_err("T-FEAT: features + explicit Dockerfile must be rejected");
+    assert!(
+        err.to_string().contains("cannot be combined"),
+        "T-FEAT: the conflict error must name the combination, got: {err}"
+    );
+}
+
+/// §f.1: the registry is the single source of truth for the CLI candidate
+/// list and the generator-layer validation (no second hand-maintained list).
+#[test]
+fn t_feat_registry_single_source() {
+    assert!(
+        !KNOWN_FEATURES.is_empty(),
+        "T-FEAT: KNOWN_FEATURES must not be empty (it feeds both clap and the validator)"
+    );
+    assert!(
+        KNOWN_FEATURES.contains(&"deepmd"),
+        "T-FEAT: the deepmd preset must be registered, got: {:?}",
+        KNOWN_FEATURES
+    );
+    for f in KNOWN_FEATURES {
+        assert!(
+            validate_features(&[f.to_string()]).is_ok(),
+            "T-FEAT: every registry entry must pass validate_features, rejected: {f}"
         );
     }
 }

@@ -67,6 +67,11 @@ enum Commands {
         #[arg(long = "variant", default_value = "psmp", value_parser = clap::builder::PossibleValuesParser::new(["psmp", "ssmp", "pdbg", "sdbg"]))]
         variant: String,
 
+        /// Feature presets for the release-cmake toolchain arm (comma list): deepmd
+        #[arg(long = "features", value_delimiter = ',',
+              value_parser = clap::builder::PossibleValuesParser::new(build::KNOWN_FEATURES))]
+        features: Vec<String>,
+
         /// Number of parallel build jobs (default: auto-detect)
         #[arg(short = 'j', long = "jobs", default_value = "0")]
         jobs: u32,
@@ -189,6 +194,7 @@ fn main() -> Result<()> {
             cpu,
             cuda,
             variant,
+            features,
             jobs,
             tag,
             no_cache,
@@ -210,6 +216,7 @@ fn main() -> Result<()> {
             shm_size,
             force,
             generate_only,
+            features,
         ),
         Commands::List { method, version } => cmd_list(method, version),
         Commands::Gui => cmd_gui(),
@@ -241,8 +248,15 @@ fn cmd_build(
     shm_size: String,
     force: bool,
     generate_only: bool,
+    features: Vec<String>,
 ) -> Result<()> {
     print_banner();
+
+    // Feature presets are validated before any Docker probing or prompt so
+    // a bad combination fails fast (clap already rejected unknown values;
+    // this is the authoritative generator-layer gate).
+    build::validate_features(&features)?;
+    build::validate_feature_arm(&method, &version, &features)?;
 
     // Check Docker (skipped by --generate-only: no daemon is needed to
     // resolve or synthesize a Dockerfile)
@@ -291,6 +305,7 @@ fn cmd_build(
         no_cache,
         dockerfile: dockerfile.map(std::path::PathBuf::from),
         shm_size,
+        features,
     };
 
     println!("\n{}", "Build Configuration:".yellow().bold());

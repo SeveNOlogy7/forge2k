@@ -142,6 +142,7 @@ impl Forge2kApp {
             no_cache: false,
             dockerfile: None,
             shm_size: self.shm_size.clone(),
+            features: Vec::new(),
         };
 
         let (tx, rx) = mpsc::channel::<build::LogLine>();

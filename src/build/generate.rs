@@ -1,6 +1,61 @@
 use super::BuildConfig;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::path::PathBuf;
+
+// ============================================================
+// Feature presets (`--features`)
+// ============================================================
+
+/// Feature presets known to the release-cmake arm. Single source of truth:
+/// the CLI builds its `PossibleValuesParser` candidate list from this array
+/// and the generator-layer [`validate_features`] validates against it, so
+/// the two cannot drift (`t_feat_registry_single_source`).
+pub(crate) const KNOWN_FEATURES: [&str; 1] = ["deepmd"];
+
+/// Generator-layer (authoritative) feature validation: unknown values and
+/// duplicates fail loud. The CLI rejects unknown values one layer earlier
+/// via clap; this covers GUI/programmatic callers and the `deepmd,deepmd`
+/// duplicate that clap cannot see.
+pub(crate) fn validate_features(features: &[String]) -> Result<()> {
+    for f in features {
+        if !KNOWN_FEATURES.contains(&f.as_str()) {
+            return Err(anyhow!(
+                "unknown feature '{f}' in --features (known features: {})",
+                KNOWN_FEATURES.join(", ")
+            ));
+        }
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for f in features {
+        if seen.contains(&f.as_str()) {
+            return Err(anyhow!("duplicate feature '{f}' in --features"));
+        }
+        seen.push(f.as_str());
+    }
+    Ok(())
+}
+
+/// Whether `--features` is implemented for this (method, version) arm: only
+/// the toolchain method's release-cmake arm (CP2K v2026.1+, not `master`,
+/// whose synthesized step is a byte-frozen regression guard).
+pub(crate) fn features_supported_arm(method: &str, version: &str) -> bool {
+    method == "toolchain" && version != "master" && toolchain_uses_cmake(version)
+}
+
+/// Reject non-empty features on every arm outside the release-cmake one:
+/// spack, native, the pre-2026 make arms and the frozen master arm stay
+/// untouched rather than silently dropping the presets.
+pub(crate) fn validate_feature_arm(method: &str, version: &str, features: &[String]) -> Result<()> {
+    if features.is_empty() || features_supported_arm(method, version) {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "feature preset(s) [{}] require method 'toolchain' with CP2K v2026.1+ (release-cmake build arm); got method='{}', version='{}'",
+        features.join(", "),
+        method,
+        version
+    ))
+}
 
 impl BuildConfig {
     /// Generate a Dockerfile from embedded templates
@@ -50,6 +105,10 @@ cp -a \"$C/HEAD/.\" /opt/cp2k/'"
 
 /// Generate Dockerfile content from build config
 pub(crate) fn generate_dockerfile_content(config: &BuildConfig) -> Result<String> {
+    // Authoritative feature validation (the CLI validates again before this
+    // point for fail-fast; GUI/programmatic callers land here directly).
+    validate_features(&config.features)?;
+    validate_feature_arm(&config.method, &config.version, &config.features)?;
     match config.method.as_str() {
         "toolchain" => generate_toolchain_dockerfile(config),
         _ => generate_spack_dockerfile(config),
