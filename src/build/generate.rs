@@ -364,6 +364,26 @@ const FEATURE_CONFIG_GUARDS: &str = r#"    test -n "$(find "${TOOLCHAIN_DIR}/ins
     test -n "$(find "${TOOLCHAIN_DIR}/install" -maxdepth 6 ! -type l -name DeePMDConfig.cmake -print -quit)" || { echo "ERROR: DeePMDConfig.cmake not found under ${TOOLCHAIN_DIR}/install; find_package(DeePMD REQUIRED CONFIG) cannot resolve (toolchain --install-all drift)" >&2; exit 1; } && \
 "#;
 
+/// Wave t4-fix OpenMP unify line for the `deepmd` preset: probe run
+/// 38695004330's `ldd cp2k.psmp` listed BOTH the system
+/// `/lib/x86_64-linux-gnu/libgomp.so.1` and the torch-bundled
+/// `.../install/libtorch-*/lib/libgomp-98b21ff3.so.1` (Anaconda-style hash
+/// name), and the deepmd compute phase SIGSEGVs with the duplicate runtime
+/// mapped (a single-thread env is inert — the clash sits at library-
+/// initialization level; the CXX11 ABI was already ruled out). Repointing
+/// the torch hashed name at the system library keeps every DT_NEEDED name
+/// intact while the loader's dev/ino dedup collapses the two into ONE
+/// in-process libgomp. Rendered immediately before the cmake call, i.e.
+/// before the `/toolchain` distillation RUN: that RUN's `cp -a` (then
+/// COPY_STEP) is what carries the link to the runtime-visible
+/// `/opt/cp2k/tools/toolchain/install/libtorch-*/lib/` path of the crash
+/// evidence. Glob target and no `|| true`: a libtorch layout drift must fail
+/// this build loudly and early (before the multi-hour cmake step), not the
+/// image at runtime — a miss leaves the pattern unexpanded and the literal
+/// `libtorch-*` path component cannot exist, so `ln` exits ENOENT.
+const FEATURE_GOMP_UNIFY: &str = r#"    ln -sf /lib/x86_64-linux-gnu/libgomp.so.1 "${TOOLCHAIN_DIR}"/install/libtorch-*/lib/libgomp-*.so.1 && \
+"#;
+
 /// CMake build step for releases >= 2026.1: the master CMake arm plus
 /// `-DCP2K_USE_LIBTORCH=OFF` in the shared base flag set. v2026.2's
 /// CMakeLists makes LIBTORCH follow CP2K_USE_EVERYTHING and the toolchain
@@ -377,7 +397,10 @@ const FEATURE_CONFIG_GUARDS: &str = r#"    test -n "$(find "${TOOLCHAIN_DIR}/ins
 /// upstream CUDA triple (`-DCP2K_USE_ACCEL=CUDA -DCP2K_WITH_GPU=<GPU>
 /// -DCMAKE_CUDA_ARCHITECTURES=<sm>`, make_cp2k.sh:898-901 with the
 /// P100/V100 sm table at :434-449). The pre-2026 make arm and master's
-/// step above are untouched by this builder.
+/// step above are untouched by this builder. The deepmd preset also inserts
+/// the OpenMP unify link ([`FEATURE_GOMP_UNIFY`], wave t4-fix): torch's
+/// bundled hashed libgomp must not leave the image with a second OpenMP
+/// runtime.
 fn release_cmake_build_step(cuda: &str, features: &[String]) -> String {
     // The CUDA triple slots between the shared base flags and the
     // IPO/LTO block; CPU renders (cuda == "none") leave it empty.
@@ -409,6 +432,7 @@ fn release_cmake_build_step(cuda: &str, features: &[String]) -> String {
     let deepmd = features.iter().any(|f| f == "deepmd");
     let (deepmd_flag, libtorch_flag) = if deepmd { ("ON", "ON") } else { ("OFF", "OFF") };
     let guards = if deepmd { FEATURE_CONFIG_GUARDS } else { "" };
+    let gomp = if deepmd { FEATURE_GOMP_UNIFY } else { "" };
 
     let mut step = format!(
         r#"SHELL ["/bin/bash", "-c"]
@@ -416,7 +440,7 @@ WORKDIR /opt/cp2k
 ENV TOOLCHAIN_DIR=/opt/cp2k/tools/toolchain
 RUN source ${{TOOLCHAIN_DIR}}/install/setup && \
     sed -i 's/set(PACKAGE_VERSION "[^"]*")/set(PACKAGE_VERSION "2.10.0")/' tools/toolchain/install/dbcsr-*/lib*/cmake/dbcsr/DBCSRConfigVersion.cmake && \
-{guards}    cmake -GNinja \
+{guards}{gomp}    cmake -GNinja \
     -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
     -DCP2K_DATA_DIR=/opt/cp2k/data \
     -DCP2K_USE_EVERYTHING=ON \
