@@ -280,12 +280,12 @@ jobs:
       # ci/cp2k-tests/assert_cp2k_output.sh: exit code 0, "PROGRAM ENDED AT",
       # an ENERGY| Total FORCE_EVAL line with a numeric value inside the
       # label's sanity interval (exact pins land after a CI baseline run).
-      # CP2K_DATA_DIR is exported because the image compiles the data-dir
-      # default to the literal string "default" (upstream CMakeLists:
-      # CP2K_DATA_DIR "default"); upstream's own tests/do_regtest.py always
-      # exports it for the same reason. --shm-size=1g mirrors the upstream
-      # test-container requirement for mpich. GPU variants are deliberately
-      # not covered (runner has no NVIDIA driver).
+      # No CP2K_DATA_DIR is passed: the release-cmake arm now compiles the
+      # data dir in as -DCP2K_DATA_DIR=/opt/cp2k/data (src/build/generate.rs,
+      # wave ci-h2o), so these runs validate the image's out-of-the-box
+      # resolution instead of papering over an env var. --shm-size=1g
+      # mirrors the upstream test-container requirement for mpich. GPU
+      # variants are deliberately not covered (runner has no NVIDIA driver).
       - name: "functional test: H2O suite (2026.2 CPU variant; hard gate)"
         if: inputs.variant == 'toolchain_2026.2_generic'
         env:
@@ -298,7 +298,6 @@ jobs:
             echo "===== FUNCTIONAL run begin: ${label} (image ${IMAGE}) ====="
             rc=0
             docker run --rm --shm-size=1g \
-              -e CP2K_DATA_DIR=/opt/cp2k/data \
               -v "$PWD/ci/cp2k-tests:/work" -w /work \
               "${IMAGE}" \
               bash -c "mpirun -np 2 cp2k -i ${inp} -o ${inp}.out" || rc=$?

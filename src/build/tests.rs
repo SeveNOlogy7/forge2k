@@ -2087,3 +2087,83 @@ fn t_review_native_advertised_versions_exclude_2026_2() {
         "review followup: toolchain 2026.2 render must stay available"
     );
 }
+
+// --------------------------------------------------------
+// Wave ci-h2o: pin the compiled-in CP2K data dir for the
+// release-cmake arm (functional-test finding)
+// --------------------------------------------------------
+//
+// Upstream v2026.2 compiles the data dir from the cache variable
+// CP2K_DATA_DIR, whose default is the sentinel "default"
+// (CMakeLists.txt:288). src/CMakeLists.txt:1825-1826 resolves that sentinel
+// at configure time to ${CMAKE_INSTALL_FULL_DATAROOTDIR}/cp2k/data and
+// :2095 installs the data tree there, so an unpinned configure bakes an
+// install-relative share path into the binary instead of the image's
+// canonical /opt/cp2k/data (the path the generated Dockerfile itself ships
+// via `COPY --from=build /opt/cp2k/data/`, both arms). The release-cmake
+// arm therefore pins CP2K_DATA_DIR to the absolute in-image path, which
+// also makes it the drop-in validation target of the ci/cp2k-tests H2O
+// suite (runs with no CP2K_DATA_DIR env var). master and the make arm stay
+// byte-frozen (pinned regression guards).
+
+/// The release-cmake renders (2026.2 CPU and GPU; 2026.1 shares the arm)
+/// must pin the compiled-in data dir to the image's /opt/cp2k/data.
+#[test]
+fn t_ci_h2o_release_cmake_pins_data_dir() {
+    for cuda in ["none", "P100"] {
+        let c = base_config("toolchain", "2026.2", "mpich", "generic", cuda, "psmp");
+        let content =
+            generate_dockerfile_content(&c).expect("render toolchain template for 2026.2");
+
+        assert!(
+            content.contains("-DCP2K_DATA_DIR=/opt/cp2k/data"),
+            "T-CIH2O: 2026.2 (cuda={cuda}) release-cmake render must pin -DCP2K_DATA_DIR=/opt/cp2k/data (upstream sentinel resolves install-relative; /opt/cp2k/data is the image's shipped data path and the ci/cp2k-tests H2O suite's no-env contract)"
+        );
+
+        // ordering: the pin belongs to the shared base flag block — after
+        // the install prefix, before the IPO/LTO block — so the CUDA triple
+        // (GPU render) keeps its slot between OPENPMD OFF and the IPO block.
+        let prefix_at = content
+            .find("-DCMAKE_INSTALL_PREFIX=/opt/cp2k/install")
+            .expect("T-CIH2O: release-cmake render must carry the install prefix flag");
+        let data_at = content
+            .find("-DCP2K_DATA_DIR=/opt/cp2k/data")
+            .expect("T-CIH2O: data-dir pin located above must be a substring");
+        let ipo_at = content
+            .find("-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF")
+            .expect("T-CIH2O: release-cmake render must carry the IPO OFF flag");
+        assert!(
+            prefix_at < data_at && data_at < ipo_at,
+            "T-CIH2O: 2026.2 (cuda={cuda}) data-dir pin must sit in the shared base block (prefix at {prefix_at}, data dir at {data_at}, IPO at {ipo_at})"
+        );
+    }
+
+    // 2026.1 shares the same release-cmake arm (toolchain_uses_cmake >=
+    // 2026.1); the pin must travel with the arm.
+    let c = base_config("toolchain", "2026.1", "mpich", "generic", "none", "psmp");
+    let content = generate_dockerfile_content(&c).expect("render toolchain template for 2026.1");
+    assert!(
+        content.contains("-DCP2K_DATA_DIR=/opt/cp2k/data"),
+        "T-CIH2O: 2026.1 shares the release-cmake arm and must carry the data-dir pin"
+    );
+}
+
+/// Master (cmake arm), 2023.2 (make arm) and the spack template must stay
+/// untouched: the data-dir pin is release-cmake-arm-only and all three
+/// render paths are pinned regression guards.
+#[test]
+fn t_ci_h2o_master_make_and_spack_render_no_data_dir_pin() {
+    for (method, version, what) in [
+        ("toolchain", "master", "master cmake arm"),
+        ("toolchain", "2023.2", "2023.2 make arm"),
+        ("spack", "2026.2", "spack arm"),
+    ] {
+        let c = base_config(method, version, "mpich", "generic", "none", "psmp");
+        let content =
+            generate_dockerfile_content(&c).expect("render template for regression guard");
+        assert!(
+            !content.contains("CP2K_DATA_DIR"),
+            "T-CIH2O: the {what} render must stay free of the data-dir pin (pinned regression guard)"
+        );
+    }
+}

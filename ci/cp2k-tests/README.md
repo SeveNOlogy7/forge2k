@@ -51,16 +51,20 @@ image's `/opt/cp2k/data/` tree. Exact per-input findings:
   at `/opt/cp2k/data/`, cross-checked against the upstream tree at the same
   pin). These relative paths resolve against `CP2K_DATA_DIR`.
 
-**`CP2K_DATA_DIR` requirement.** The cmake build compiles the data-dir
-default to the literal string `default` (upstream `CMakeLists.txt`:
-`set(CP2K_DATA_DIR "default" CACHE STRING ...)`, consumed as
-`__DATA_DIR` in `src/CMakeLists.txt`; `src/common/cp_data_dir.c` returns it
-when the env var is unset). The image itself sets no `CP2K_DATA_DIR`
-(entrypoint.sh only sources the toolchain setup and sets `OMP_STACKSIZE`), so
-every `docker run` in the workflow exports `-e CP2K_DATA_DIR=/opt/cp2k/data`
--- exactly what upstream's own harness does (`tests/do_regtest.py` always
-exports `CP2K_DATA_DIR` before launching `cp2k`). Without it the runs abort
-on the first missing basis-set file.
+**Data dir: compiled in, no environment variable needed.** The release-cmake
+arm of the generator pins `-DCP2K_DATA_DIR=/opt/cp2k/data`
+(`src/build/generate.rs`, wave ci-h2o; upstream variable is the cache entry
+`CP2K_DATA_DIR`, consumed as the `__DATA_DIR` macro in
+`src/CMakeLists.txt` and read by `src/common/cp_data_dir.c`). Without the pin,
+upstream's default is the sentinel `"default"`, which `src/CMakeLists.txt`
+resolves at configure time to `${CMAKE_INSTALL_FULL_DATAROOTDIR}/cp2k/data`
+and installs the data tree to — an install-relative share path, not the
+`/opt/cp2k/data` location this image itself ships and documents. With the pin
+the binary resolves basis sets, potentials and DFTB parameters straight from
+`/opt/cp2k/data`, so the workflow passes **no** `CP2K_DATA_DIR` and the runs
+validate the image's out-of-the-box behavior. (Upstream's own
+`tests/do_regtest.py` sets the env var because it runs against a source
+checkout, not an installed image.)
 
 ## Expected values
 
@@ -89,12 +93,14 @@ ENERGY lines` block the workflow step prints at its end.
 
 - `ASSERT FAIL ... exit code is not 0`: the CP2K run died. Read the
   `FUNCTIONAL run begin/end` block above it; typical causes:
-  - `... cannot open file ...` / missing basis set -> `CP2K_DATA_DIR` was not
-    passed (see above);
+  - `... cannot open file ...` / missing basis set -> the compiled-in data
+    dir regressed (the `-DCP2K_DATA_DIR=/opt/cp2k/data` pin in
+    `src/build/generate.rs`; guarded by the `t_ci_h2o` tests) — the
+    workflow intentionally passes no `CP2K_DATA_DIR`;
   - MPI errors at startup -> `--shm-size=1g` is mandatory for mpich inside
     docker (upstream test containers require the same);
   - DFTB: `scc_parameter` / `*.spl` not found -> the `DFTB/scc` resolution
-    failed, same data-dir cause.
+    failed, same compiled-in data-dir cause.
 - `missing 'PROGRAM ENDED AT'`: the run was killed (OOM/timeout) or aborted
   mid-way after a nonzero soft exit.
 - `energy value is not numeric`: the ENERGY line carries `NaN`/`Inf` or a
