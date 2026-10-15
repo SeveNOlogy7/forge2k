@@ -274,6 +274,47 @@ jobs:
           docker run --rm cp2k/cp2k:2026.2_mpich_generic_psmp cp2k --version
           echo "=== smoke end: CPU image has no GPU dependency, this step is a hard acceptance gate ==="
 
+      # --- 2026.2 CPU functional suite (wave: H2O functional test) --------
+      # Four pinned upstream H2O inputs (ci/cp2k-tests/, sources+hashes in its
+      # README) are run for real inside the CPU image and asserted by
+      # ci/cp2k-tests/assert_cp2k_output.sh: exit code 0, "PROGRAM ENDED AT",
+      # an ENERGY| Total FORCE_EVAL line with a numeric value inside the
+      # label's sanity interval (exact pins land after a CI baseline run).
+      # CP2K_DATA_DIR is exported because the image compiles the data-dir
+      # default to the literal string "default" (upstream CMakeLists:
+      # CP2K_DATA_DIR "default"); upstream's own tests/do_regtest.py always
+      # exports it for the same reason. --shm-size=1g mirrors the upstream
+      # test-container requirement for mpich. GPU variants are deliberately
+      # not covered (runner has no NVIDIA driver).
+      - name: "functional test: H2O suite (2026.2 CPU variant; hard gate)"
+        if: inputs.variant == 'toolchain_2026.2_generic'
+        env:
+          IMAGE: cp2k/cp2k:2026.2_mpich_generic_psmp
+        run: |
+          set -u
+          fail=0
+          for inp in h2o-quickstep.inp h2o-qs-ot.inp h2o-se.inp h2o-dftb-scc.inp; do
+            label="${inp%.inp}"
+            echo "===== FUNCTIONAL run begin: ${label} (image ${IMAGE}) ====="
+            rc=0
+            docker run --rm --shm-size=1g \
+              -e CP2K_DATA_DIR=/opt/cp2k/data \
+              -v "$PWD/ci/cp2k-tests:/work" -w /work \
+              "${IMAGE}" \
+              bash -c "mpirun -np 2 cp2k -i ${inp} -o ${inp}.out" || rc=$?
+            echo "===== FUNCTIONAL run end: ${label} rc=${rc} ====="
+            bash ci/cp2k-tests/assert_cp2k_output.sh "ci/cp2k-tests/${inp}.out" "${label}" "${rc}" || fail=1
+          done
+          echo "===== FUNCTIONAL evidence: ENERGY lines ====="
+          grep -hE "ENERGY\|" ci/cp2k-tests/*.out || true
+          echo "===== FUNCTIONAL evidence: PROGRAM ENDED counts (one per output) ====="
+          grep -hc "PROGRAM ENDED AT" ci/cp2k-tests/*.out || true
+          if [ "${fail}" -ne 0 ]; then
+            echo "FUNCTIONAL VERDICT:FAIL" >&2
+            exit 1
+          fi
+          echo "FUNCTIONAL VERDICT:PASS"
+
       - name: smoke test docker run cp2k --version (2026.2 GPU variant; no NVIDIA driver on runner; tolerated)
         if: inputs.variant == 'cuda_2026.2_P100'
         run: |
