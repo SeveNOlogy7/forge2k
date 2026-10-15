@@ -18,11 +18,12 @@
 #   d) at least one unified energy line is present. CP2K v2026.2 prints the
 #      same line format for every force-evaluation method
 #      (src/force_env_methods.F, "Print energy always in the same format for
-#      all methods"):
-#        ENERGY| Total FORCE_EVAL ( QS ) energy [a.u.]:   <value>
+#      all methods"); this build prints the unit token as [hartree]:
+#        ENERGY| Total FORCE_EVAL ( QS ) energy [hartree]   <value>
 #      QS/DFT, SE (AM1) and DFTB (SCC) all run inside the QS framework
 #      (use_prog_name(use_qs_force) == "QS"), so one pattern covers all four
-#      suite inputs; the LAST matching line is the one checked.
+#      suite inputs; the pattern deliberately does not pin the unit token,
+#      and the LAST matching line is the one checked.
 #   e) that value is numeric (rejects NaN/Inf/text) and inside the label's
 #      sanity interval (table below). A label may instead be PINNED to an
 #      exact value +- tolerance: either from a CI baseline run or, like
@@ -66,11 +67,20 @@ declare -A SANITY_HI=( [h2o-dftb-scc]=-5 )
 #   (matcher M011 = GenericMatcher(r"ENERGY| Total FORCE_EVAL", col=9):
 #   ref -17.266752586704772, tol 1.0E-6). A legitimate change of CP2K version
 #   or DeePMD model changes this number; that is the point of the pin.
-#   The H2O suite labels stay unpinned until a CI baseline run fixes their
-#   canonical numbers (see README.md, "Expected values").
+#   h2o-*: baseline pins from successful e2e run 38676712292 (2026-10-15,
+#   variant toolchain_2026.2_generic, image
+#   cp2k/cp2k:2026.2_mpich_generic_psmp). Each expected value is the LAST
+#   "ENERGY| Total FORCE_EVAL" line that run printed - exactly what this
+#   script extracts (tail -n 1 above). Tolerance 1e-6 a.u. absorbs
+#   cross-machine floating-point / MPI-reduction jitter for the same image
+#   plus byte-exact inputs; anything larger is a real regression.
 # ---------------------------------------------------------------------------
 declare -A PINNED=(
    [deepmd-water]="-17.266752586704772:1e-6"
+   [h2o-quickstep]="-17.212337144585160:1e-6"
+   [h2o-qs-ot]="-15.642164448397811:1e-6"
+   [h2o-se]="-12.809418844339213:1e-6"
+   [h2o-dftb-scc]="-130.557012120984041:1e-6"
 )
 
 fails=0

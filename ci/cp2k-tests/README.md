@@ -98,30 +98,42 @@ format for every force-evaluation method; QS/DFT, SE and DFTB all run inside
 the QS framework, so their label is `( QS )`; the deepmd run is `METHOD FIST`,
 so its label is `( FIST )` and the same pattern covers it).
 
-Pinned label (exact value +- tolerance):
+Pinned labels (exact value +- tolerance):
 
 | label (input stem) | expected (a.u.) | tolerance | source |
 |---|---|---|---|
-| `deepmd-water` | `-17.266752586704772` | `1e-6` | upstream `tests/Fist/regtest-deepmd/TEST_FILES.toml` @ `support/v2026.2` (blob `248c45a29efd0055f7a9903132e6900e27ee3c97`): `"deepmd_water.inp" = [{matcher="M011", tol=1.0E-6, ref=-17.266752586704772}]`, with `M011 = GenericMatcher(r"ENERGY| Total FORCE_EVAL", col=9)` (`tests/matchers.py`); pinned identically in `assert_cp2k_output.sh` (`PINNED[deepmd-water]`) |
+| `h2o-quickstep` | `-17.212337144585160` | `1e-6` | CI baseline run `38676712292` (2026-10-15, success; variant `toolchain_2026.2_generic`, image `cp2k/cp2k:2026.2_mpich_generic_psmp`), last `ENERGY|` line |
+| `h2o-qs-ot` | `-15.642164448397811` | `1e-6` | CI baseline run `38676712292`, last `ENERGY|` line |
+| `h2o-se` | `-12.809418844339213` | `1e-6` | CI baseline run `38676712292`, last `ENERGY|` line |
+| `h2o-dftb-scc` | `-130.557012120984041` | `1e-6` | CI baseline run `38676712292`, last `ENERGY|` line |
+| `deepmd-water` | `-17.266752586704772` | `1e-6` | upstream `tests/Fist/regtest-deepmd/TEST_FILES.toml` @ `support/v2026.2` (blob `248c45a29efd0055f7a9903132e6900e27ee3c97`): `"deepmd_water.inp" = [{matcher="M011", tol=1.0E-6, ref=-17.266752586704772}]`, with `M011 = GenericMatcher(r"ENERGY| Total FORCE_EVAL", col=9)` (`tests/matchers.py`) |
 
-H2O suite labels: **sanity mode -- exact values to be pinned after a CI
-baseline run.** Intervals:
+Tolerance semantics: the pinned number is what the same image with the
+byte-exact inputs reproduces (baseline run `38676712292`); 1e-6 a.u. absorbs
+cross-machine floating-point and MPI-reduction-order jitter between runs
+while still catching any real regression (version/model/physics change).
+The pin is applied to the LAST `ENERGY| Total FORCE_EVAL ( ... ) energy
+[hartree]:` line of the output — the same line the baseline values were read
+from and the same one `assert_cp2k_output.sh` extracts (`tail -n 1`). (The
+unit token printed by this build is `[hartree]`, the atomic unit of energy;
+the script's pattern deliberately does not pin the unit token, so an upstream
+unit-string rename cannot break the gate. Multi-step runs print one ENERGY
+line per force evaluation — e.g. `h2o-se` printed 7, `h2o-dftb-scc` 3 — and
+only the last one is asserted.)
 
-| label (input stem) | sanity interval (a.u.) | rationale |
+Pinning mechanics: set `PINNED[<label>]="<expected>:<tolerance>"` in
+`ci/cp2k-tests/assert_cp2k_output.sh`. Pinned labels get a strict
+`|value - expected| <= tolerance` check; unpinned labels print
+`UNPINNED <label> (sanity mode)` and take only the per-label sanity interval
+below. All five labels above are pinned; the intervals stay in the script as
+documentation/fallback for any label without a pin:
+
+| label (input stem) | sanity interval fallback (a.u.) | rationale |
 |---|---|---|
 | `h2o-quickstep` | `[-100, -5]` | single H2O cell, QS/DFT total energy |
 | `h2o-qs-ot` | `[-100, -5]` | single H2O cell, QS/OT total energy |
 | `h2o-se` | `[-100, -5]` | single H2O cell; the printed a.u. energy is the eV `Total energy [eV]:` value / 27.2114 |
-| `h2o-dftb-scc` | `[-1000, -5]` | 64-water periodic box: SCC total energy is ~-130.6 a.u. (upstream `tests/DFTB/regtest-scc/TEST_FILES.toml` reference for `h2o-1.inp` is -130.55701170331295), i.e. outside the generic `[-100, -5]` bracket; this is interval evidence only, not a pin |
-
-Pinning: set `PINNED[<label>]="<expected>:<tolerance>"` in
-`ci/cp2k-tests/assert_cp2k_output.sh`. Pinned labels get a strict
-`|value - expected| <= tolerance` check; unpinned labels print
-`UNPINNED <label> (sanity mode)` and only take the interval check. For the H2O
-suite the baseline values can be read off the `FUNCTIONAL evidence: ENERGY
-lines` block the workflow step prints at its end; `deepmd-water` is pinned
-from the start because the upstream regtest reference makes a baseline run
-unnecessary.
+| `h2o-dftb-scc` | `[-1000, -5]` | 64-water periodic box: SCC total energy is ~-130.6 a.u., outside the generic `[-100, -5]` bracket |
 
 ## Failure triage
 
@@ -139,12 +151,17 @@ unnecessary.
   mid-way after a nonzero soft exit.
 - `energy value is not numeric`: the ENERGY line carries `NaN`/`Inf` or a
   Fortran overflow marker.
-- `pinned value out of tolerance` (`deepmd-water`): the DeePMD computation
-  drifted from the upstream reference. Separate the two obvious causes first:
-  a CP2K/DeePMD version or model change (the upstream reference is tied to the
-  pin), versus a genuinely broken build. The `-np 1` and `-np 2` runs are
-  asserted separately, so a rank-dependent mismatch (MPI sharing bug) shows up
-  as the `np2` iteration failing while `np1` passes.
+- `pinned value out of tolerance` (any pinned label): the computation
+  drifted from its reference. For the H2O suite labels the reference is
+  baseline run `38676712292` (2026-10-15); with unchanged byte-exact inputs
+  and image a drift beyond 1e-6 a.u. indicates a regression, while a
+  deliberate toolchain/CP2K rebuild that shifts physics legitimately requires
+  re-baselining from a fresh green run. For `deepmd-water`: the DeePMD
+  computation drifted from the upstream reference. Separate the two obvious
+  causes first: a CP2K/DeePMD version or model change (the upstream reference
+  is tied to the pin), versus a genuinely broken build. The `-np 1` and
+  `-np 2` runs are asserted separately, so a rank-dependent mismatch (MPI
+  sharing bug) shows up as the `np2` iteration failing while `np1` passes.
 - `deepmd-water` run dies with `water_dpa2.pth` not found -> the data-dir
   resolution failed for the model path (`/opt/cp2k/data/DeePMD/`), same
   compiled-in data-dir cause as above.
