@@ -46,6 +46,7 @@ forge2k list
      --cpu <CPU>          CPU 目标: x86_64 / generic / cascadelake / haswell / skylake-avx512 [默认: x86_64]
      --cuda <CUDA>        CUDA GPU: none / P100 / V100 [默认: none]
      --variant <VARIANT>  二进制变体: psmp / ssmp / pdbg / sdbg [默认: psmp]
+     --features <FEATURES>  功能预设（逗号分隔）: deepmd [默认: 空]
 -j,  --jobs <JOBS>        并行构建任务数（默认自动探测）
 -t,  --tag <TAG>          自定义镜像 tag
      --no-cache           禁用 Docker 构建缓存
@@ -59,6 +60,23 @@ forge2k list
 ### 镜像 tag 命名
 
 `cp2k/cp2k:{version}_{mpi}_{cpu}[_cuda_{GPU}]_{variant}`，例如 `cp2k/cp2k:2025.2_mpich_x86_64_psmp`；master 分支使用构建当日日期戳（`master_YYYYMMDD`）。
+
+### 功能预设（--features）
+
+`build` 支持用 `--features`（逗号分隔，默认空）按需开启镜像功能，当前可用 preset：`deepmd`。
+
+```bash
+forge2k build -m toolchain -v 2026.2 --features deepmd
+```
+
+| preset | 语义 | 支持臂 | tag 后缀 |
+|---|---|---|---|
+| `deepmd` | 启用 CP2K 的 DeePMD（机器学习势）支持，联动 LibTorch 一起开启（上游语义成对） | toolchain 方法 2026.x 的 release-cmake 臂 | `_deepmd` |
+
+- 启用 `deepmd` 只翻转 `-DCP2K_USE_DEEPMD=ON` / `-DCP2K_USE_LIBTORCH=ON` 两个 cmake 旗标：工具链 `setup` 已把依赖导出进 `CMAKE_PREFIX_PATH`，**无需用户提供任何额外路径或环境变量**。
+- tag 后缀追加在 variant 之后（如 `--cpu generic` 时 `cp2k/cp2k:2026.2_mpich_generic_psmp_deepmd`）；不带 `--features` 时 tag 与旧版逐字节相同。
+- fail-loud：未知 feature、重复 feature、在不支持的臂（spack / native / master / 2023.2 make）上携带 `--features`、或与显式 `-f/--dockerfile` 组合，均直接报错退出，不会静默忽略。
+- 体积影响：libtorch / deepmd 的库文件本就随 toolchain `--install-all` 进入镜像，功能开启的边际体积主要是 cp2k 二进制新增的链接（`libdeepmd_c.so` / `libtorch.so` 均已在镜像内）。
 
 ## GUI
 

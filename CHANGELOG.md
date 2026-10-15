@@ -9,6 +9,8 @@
 - **CP2K 2026.2 toolchain 支持**：版本注册 2026.2（toolchain 合成两条：generic none / generic P100，psmp 变体；CLI 默认版本仍为 2026.1）；release 构建新增 **release-cmake 臂**——上游 ≥2026.1 已删除根 Makefile，走 `cmake -GNinja` 构建（EVERYTHING=ON + DLAF/PEXSI/DEEPMD/LIBTORCH OFF 共用基础旗标集）；CUDA 侧新增 cmake 三旗标（`-DCP2K_USE_ACCEL=CUDA -DCP2K_WITH_GPU=<GPU> -DCMAKE_CUDA_ARCHITECTURES=<sm>`，P100→60 / V100→70），P100/V100 变体对 2026.2 可用
 - 新增 `--generate-only` 模式：跳过 docker 检查与确认提示，仅解析/生成 Dockerfile 并打印路径摘要（exit 0），未置位时默认行为零变化
 - `E2E image build` workflow 新增两 dispatch 变体（`toolchain_2026.2_generic` / `cuda_2026.2_P100`）：2026-10-13 双变体 CI 真实编译成功（CPU 冒烟硬门输出 `CP2K version 2026.2`；镜像 `cp2k/cp2k:2026.2_mpich_generic_psmp` 与 `cp2k/cp2k:2026.2_mpich_generic_cuda_P100_psmp`；run 38422866467 / 38422948855）
+- **`--features` 功能预设机制**：`forge2k build` 新增 `--features <FEATURES>`（逗号分隔，默认空），首个 preset `deepmd`；仅在 toolchain 方法的 2026.x release-cmake 臂生效，未知 feature、重复 feature 或不支持臂上携带均 fail-loud 报错退出，不静默忽略
+- **`deepmd` preset**：成对翻转 `-DCP2K_USE_DEEPMD` / `-DCP2K_USE_LIBTORCH` 为 ON（上游语义成对），无需任何额外路径/环境变量（工具链 `setup` 的 `CMAKE_PREFIX_PATH` 已覆盖依赖）；镜像 tag 追加后缀 `_deepmd`（如 `cp2k/cp2k:2026.2_mpich_generic_psmp_deepmd`），无 features 时 tag 与旧版逐字节相同
 
 ### Fixed（第七期）
 
