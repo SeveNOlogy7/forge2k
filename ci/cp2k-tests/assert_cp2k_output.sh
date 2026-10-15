@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # assert_cp2k_output.sh -- hard-gate assertions over one CP2K output file.
 #
-# Part of the e2e-images H2O functional suite (CPU variant
-# toolchain_2026.2_generic, image cp2k/cp2k:2026.2_mpich_generic_psmp).
+# Part of the e2e-images functional gates: the H2O suite (CPU variant
+# toolchain_2026.2_generic, image cp2k/cp2k:2026.2_mpich_generic_psmp) and the
+# deepmd water test (variant toolchain_2026.2_generic_deepmd, image
+# cp2k/cp2k:2026.2_mpich_generic_psmp_deepmd).
 # Pure bash/awk/grep, no python: runs unchanged on the GitHub ubuntu runner
 # and on a local Git Bash.
 #
@@ -23,9 +25,10 @@
 #      suite inputs; the LAST matching line is the one checked.
 #   e) that value is numeric (rejects NaN/Inf/text) and inside the label's
 #      sanity interval (table below). A label may instead be PINNED to an
-#      exact value +- tolerance once a CI baseline run has produced the
-#      canonical number; unpinned labels pass the sanity interval alone and
-#      print "UNPINNED <label> (sanity mode)".
+#      exact value +- tolerance: either from a CI baseline run or, like
+#      deepmd-water, from the upstream regtest reference. Unpinned labels
+#      pass the sanity interval alone and print "UNPINNED <label> (sanity
+#      mode)".
 #
 # Exit codes: 0 = all assertions passed, 2 = usage error, 1 = assertion failed.
 
@@ -57,12 +60,18 @@ declare -A SANITY_HI=( [h2o-dftb-scc]=-5 )
 
 # ---------------------------------------------------------------------------
 # Exact-value pins: LABEL -> "expected:tolerance".
-# Intentionally EMPTY in v1: the suite runs in sanity mode until a CI
-# baseline run fixes the canonical numbers (see README.md, "Expected
-# values"). Example once pinned:
-#   PINNED[h2o-quickstep]="-17.1615063648948:1e-4"
+#   deepmd-water: upstream reference, not a baseline guess - the input is a
+#   byte-exact copy of the upstream regtest file and its pinned value is the
+#   upstream reference in tests/Fist/regtest-deepmd/TEST_FILES.toml
+#   (matcher M011 = GenericMatcher(r"ENERGY| Total FORCE_EVAL", col=9):
+#   ref -17.266752586704772, tol 1.0E-6). A legitimate change of CP2K version
+#   or DeePMD model changes this number; that is the point of the pin.
+#   The H2O suite labels stay unpinned until a CI baseline run fixes their
+#   canonical numbers (see README.md, "Expected values").
 # ---------------------------------------------------------------------------
-declare -A PINNED=()
+declare -A PINNED=(
+   [deepmd-water]="-17.266752586704772:1e-6"
+)
 
 fails=0
 pass() { echo "ASSERT PASS [${LABEL}] $*"; }
