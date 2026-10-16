@@ -1,0 +1,1191 @@
+name: probe-diagnose (TEMPORARY, wave deepmd-revival)
+
+# TEMPORARY probe artifact, not part of the product surface.
+# DELETE together with the wave once the dispatch evidence is recorded
+# (convention: separate add commit -> dispatch -> separate remove commit).
+#
+# Purpose (wave deepmd-revival): obtain the REAL SYMBOLIZED backtrace of the
+# deterministic deepmd compute-time SIGSEGV -- library name + in-library
+# offset + function name -- because static symbol fingerprinting is blind on
+# this binary: torch's indirect calls leave 25 candidates in
+# libtorch_cpu.so/libtorch_python.so and none can be validated by the call
+# chain (see ci/cp2k-tests/README.md "known upstream issue").
+#
+# Already established (do not re-derive here):
+#   - crash is deterministic (rc=139), AFTER the DeePMD model loads, during
+#     compute; np1/np2 die at the same point (runs 38682037203 / 38707255454);
+#   - it is NOT an ABI, thread-env, libgomp, 22.04-vs-24.04 or
+#     deepmd-3.1.0-vs-3.1.3 variable; the crash PC low-12 bits are constant
+#     across every configuration -- 0x960 / 0xac5 / 0x51f -- so the faulting
+#     code path is inside the official libtorch binaries;
+#   - the only reporter that has ever emitted addresses is the
+#     libgfortran-style handler ("Program received signal SIGSEGV ...
+#     Backtrace for this error: #0 0x.. in ???"): addresses only, no module
+#     attribution, and (unknown at that time) it is itself a displaced-handler
+#     hazard for every constructor-based LD_PRELOAD reporter.
+#
+# Mechanism (deliberately does NOT depend on gdb or libSegFault being usable):
+#   stage 2  heredoc-write ci/cp2k-tests/bt-printer.c + bt-symbolize.py
+#   stage 3  build the reporter IN the probe image (gcc), then
+#              (a) baseline run, no preload  -> the recorded-style "#N 0x.."
+#                  addresses for a same-image, same-run crash-point check;
+#              (b) LD_PRELOAD=bt-printer.so run -> BT[] frame addresses, the
+#                  exact faulting RIP/FAULT, and the dl_iterate_phdr module
+#                  map (MOD <path> base=.. lo=.. hi=..) on fd 2;
+#              (c) the same preload under `mpirun -np 1 env LD_PRELOAD=..`
+#                  (the historical harness) as an independent second capture.
+#   stage 4  symbolization INSIDE the image (python3 + addr2line/nm), because
+#            only the image holds the real .so files: address -> module
+#            [lo,hi) -> offset -> `addr2line -f -C` -> function; on "??"
+#            (stripped release libtorch) a binary search over
+#            `nm -D -S --defined-only -C <lib>` dynamic symbols.
+#   stage 5  fallbacks, both attempted and both informational:
+#              (a) libSegFault.so when the image still ships it
+#                  (note: it is constructor-based, so it suffers the very
+#                   displacement this probe works around -- expect a miss);
+#              (b) gdb -batch with --cap-add=SYS_PTRACE (docker's default
+#                  seccomp blocks ptrace without that capability, a candidate
+#                  cause for the two earlier silent gdb attempts) and with the
+#                  apt logs kept on purpose; a gdb ptrace self-test runs first
+#                  so a failure to trace is distinguishable from a crash that
+#                  produced no frames.
+#
+# Why bt-printer.c interposes sigaction()/signal() instead of only installing
+# a constructor handler: CP2K is a Fortran main program, so libgfortran
+# installs its own fatal-signal handler while the program starts -- that
+# handler is the author of the recorded "in ???" output -- and it would
+# silently replace a constructor-installed handler. Foreign *handler*
+# installs for the five fatal signals are therefore refused and logged (with
+# a short caller backtrace); SIG_DFL/SIG_IGN requests are honoured and noted.
+# The module map is additionally dumped at load time, unconditionally, so
+# symbolization of the recorded-style addresses still works even if the
+# handler is replaced by means this interposer does not cover.
+#
+# Judgement (pre-registered; bare tokens + detail lines, printed by the
+# always-on verdict matrix):
+#   PASS_SYMBOLIZED_TRACE: preload rc=139 + SIG=11 + frames mapped, with at
+#        least one libtorch*.so frame carrying a FUNCTION NAME -> the
+#        deliverable (module + offset + function) is in bt-symbolized.txt
+#   PASS_OFFSETS_ONLY    : libtorch frames mapped but no function name
+#        resolved (module+offset only; still pinpoints the code path)
+#   PASS_PARTIAL_MAPPED  : frames mapped, none in libtorch -> a different
+#        crash point than recorded; report as new information, not as success
+#   FAIL_NO_CRASH_REPRODUCED : preload run did not die with rc=139
+#        (crash nondeterministic/absent in this image -> itself new info)
+#   FAIL_NO_HANDLER_OUTPUT   : rc=139 but no SIG/BT lines (handler displaced
+#        by something the interposer missed) -> read gdb/libSegFault/baseline
+#   FAIL_IMAGE_BUILD / FAIL_SOURCES_NOT_WRITTEN / FAIL_SYMBOLIZE : tooling
+#   Corroboration tokens (reported, never overriding the verdict):
+#     SIGNATURE_960/AC5/51F : the recorded crash-point low-12 bits found
+#        among the symbolized offsets (same code path)
+#     LOW12_SUBSET          : every baseline-run address low-12 bit appears
+#        in the preload capture (same crash point, different process ASLR)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [probe/diagnose]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: probe-diagnose
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: deepmd SIGSEGV symbolized backtrace (preload reporter -> in-image symbolization)
+    runs-on: ubuntu-latest
+    # Budget arithmetic: e2e deepmd reference run 38682037203 (cold toolchain
+    # --install-all + CP2K build + tests) = 1h42m; the image rebuild here is
+    # the same shape (cap 240 min, ~2h expected). Diagnostics are bounded
+    # step-wise (25+20+15+30 = 90 min worst case) so the always-on matrix and
+    # artifact upload still run under the 355 min job cap (repo convention
+    # 350/355, well under the GitHub 6h hard cap).
+    timeout-minutes: 355
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo build (debug binary drives forge2k build)
+        run: cargo build
+
+      # ---- stage 1: rebuild the deepmd image with forge2k (hard gate) -----
+      # The ~2h toolchain rebuild is unavoidable: the crash is only observable
+      # in the real (--features deepmd) image. --generate-only is deliberately
+      # NOT used here -- the point is to produce the image. `printf 'y\n'`
+      # answers forge2k's interactive "Start build?" prompt (stdin EOF would
+      # also proceed; the explicit line removes the TTY question).
+      - name: "stage 1: forge2k build -m toolchain -v 2026.2 --features deepmd (hard gate)"
+        id: build
+        timeout-minutes: 240
+        run: |
+          set -uo pipefail
+          rc=0
+          printf 'y\n' | ./target/debug/forge2k build -m toolchain -v 2026.2 --cpu generic --cuda none --features deepmd 2>&1 | tee forge2k-build.log || rc=$?
+          echo "===== forge2k build end rc=${rc} ====="
+          if [ "${rc}" -ne 0 ]; then
+            echo "BUILD_VERDICT:FAIL rc=${rc}"
+            echo "BUILD_DETAIL: forge2k build failed; tail of forge2k-build.log follows"
+            tail -n 60 forge2k-build.log || true
+            exit 1
+          fi
+          IMAGE=cp2k/cp2k:2026.2_mpich_generic_psmp_deepmd
+          if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+            echo "PROBE_IMAGE=${IMAGE}" >> "${GITHUB_ENV}"
+            echo "BUILD_VERDICT:PASS"
+            echo "BUILD_DETAIL: image ${IMAGE} present after forge2k build"
+            docker image inspect -f 'image_id={{.Id}} size_bytes={{.Size}}' "${IMAGE}" || true
+          else
+            echo "BUILD_VERDICT:FAIL rc=0 but ${IMAGE} is missing"
+            echo "BUILD_DETAIL: images built in this run:"
+            docker images --format '{{.Repository}}:{{.Tag}}' | grep -iE '2026\.2|deepmd' || true
+            exit 1
+          fi
+
+      # ---- stage 2: hand the probe sources to the mounted test dir -------
+      - name: "stage 2: write bt-printer.c + bt-symbolize.py (probe sources)"
+        id: write
+        run: |
+          set -euo pipefail
+          W=ci/cp2k-tests
+          test -f "${W}/deepmd-water.inp" || { echo "WRITE_VERDICT:FAIL ${W}/deepmd-water.inp missing"; exit 1; }
+
+          # Crash reporter, loaded with LD_PRELOAD inside the probe image.
+          # Signal-path safety: backtrace() + readlink() + dl_iterate_phdr()
+          # + snprintf() into stack buffers + write(2) only; no malloc, no
+          # stdio streams. The sigaction()/signal() interposers keep the
+          # reporter armed against libgfortran/MPICH handler installs.
+          cat > "${W}/bt-printer.c" <<'BT_PRINTER_C_EOF'
+          /* bt-printer.c -- LD_PRELOAD crash reporter for the deepmd SIGSEGV probe.
+           *
+           * Output protocol on fd 2 (consumed by bt-symbolize.py):
+           *   bt-printer: armed (LD_PRELOAD)      <- load-time marker
+           *   MOD <path|<main>> base=.. lo=.. hi=..  <- module map, dumped at
+           *                                            LOAD TIME (handler-proof
+           *                                            symbolization anchor) and
+           *                                            again from the handler
+           *   MODULES-DONE
+           *   -- on a fatal signal: --
+           *   BT-BEGIN / BT[<i>]=0x<addr> ... / PC=0x<rip> / FAULT=0x<addr>
+           *   EXE=<path> / MOD ... / SIG=<n> / BT-END
+           *   SUPPRESS sigaction sig=<n> handler=0x.. refused ...   (if an
+           *   SUPPRESS-BT[<i>]=0x..                                install was
+           *                                                        refused)
+           *
+           * Then _exit(139): the harness must see the recorded rc=139 no
+           * matter which of the five signals fired. SA_RESETHAND so a fault
+           * inside the reporter itself dies immediately instead of looping.
+           *
+           * Build: gcc -shared -fPIC -O1 -o bt-printer.so bt-printer.c -ldl
+           */
+          #define _GNU_SOURCE
+          #include <dlfcn.h>
+          #include <execinfo.h>
+          #include <link.h>
+          #include <signal.h>
+          #include <stdarg.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <ucontext.h>
+          #include <unistd.h>
+
+          #define BT_MAX 32
+          #define LINE_MAX 512
+          #define EXIT_RC 139 /* the recorded deepmd crash exit status */
+
+          static const int fatal_sigs[] = {SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE};
+          #define FATAL_N ((int)(sizeof(fatal_sigs) / sizeof(fatal_sigs[0])))
+
+          static void crash_handler(int, siginfo_t *, void *);
+
+          /* ---------- async-signal-safe output ---------- */
+
+          static void
+          put(const char *s, long n)
+          {
+            long off = 0;
+            while (off < n) {
+              ssize_t w = write(2, s + off, (size_t)(n - off));
+              if (w <= 0) break; /* EINTR/EAGAIN/EPIPE: give up quietly */
+              off += (long)w;
+            }
+          }
+
+          static void
+          putf(const char *fmt, ...)
+          {
+            char buf[LINE_MAX];
+            va_list ap;
+            int n;
+            va_start(ap, fmt);
+            n = vsnprintf(buf, sizeof(buf), fmt, ap);
+            va_end(ap);
+            if (n > 0) put(buf, n < (long)sizeof(buf) ? n : (long)sizeof(buf) - 1);
+          }
+
+          static int
+          is_fatal(int sig)
+          {
+            int i;
+            for (i = 0; i < FATAL_N; i++)
+              if (fatal_sigs[i] == sig) return 1;
+            return 0;
+          }
+
+          /* ---------- module map ---------- */
+
+          static int
+          mod_cb(struct dl_phdr_info *info, size_t size, void *data)
+          {
+            unsigned long lo = ~0UL, hi = 0, a, b;
+            int i;
+            (void)size;
+            (void)data;
+
+            if (!info->dlpi_phdr) return 0;
+            for (i = 0; i < info->dlpi_phnum; i++) {
+              const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+              if (ph->p_type != PT_LOAD) continue;
+              a = (unsigned long)info->dlpi_addr + (unsigned long)ph->p_vaddr;
+              b = a + (unsigned long)ph->p_memsz;
+              if (a < lo) lo = a;
+              if (b > hi) hi = b;
+            }
+            if (hi == 0) return 0; /* no PT_LOAD: nothing to attribute */
+            putf("MOD %s base=0x%lx lo=0x%lx hi=0x%lx\n",
+                 (info->dlpi_name && info->dlpi_name[0]) ? info->dlpi_name : "<main>",
+                 (unsigned long)info->dlpi_addr, lo, hi);
+            return 0;
+          }
+
+          /* ---------- the crash report ---------- */
+
+          static void
+          crash_handler(int sig, siginfo_t *si, void *uc)
+          {
+            void *bt[BT_MAX];
+            char exe[LINE_MAX];
+            ssize_t m;
+            int n, i;
+
+            put("BT-BEGIN\n", 9);
+
+            n = backtrace(bt, BT_MAX);
+            if (n <= 0) put("BT-EMPTY\n", 9);
+            for (i = 0; i < n; i++) putf("BT[%d]=%p\n", i, bt[i]);
+
+          #if defined(__x86_64__)
+            if (uc) {
+              ucontext_t *u = (ucontext_t *)uc;
+              putf("PC=0x%lx\n", (unsigned long)u->uc_mcontext.gregs[REG_RIP]);
+            }
+          #endif
+            if (si) putf("FAULT=0x%lx\n", (unsigned long)(uintptr_t)si->si_addr);
+
+            m = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+            if (m > 0) {
+              exe[m] = '\0';
+              putf("EXE=%s\n", exe);
+            } else {
+              put("EXE=<unresolved>\n", 17);
+            }
+
+            dl_iterate_phdr(mod_cb, NULL); /* the symbolization anchor */
+
+            putf("SIG=%d\n", sig);
+            put("BT-END\n", 7);
+            _exit(EXIT_RC);
+          }
+
+          /* ---------- interposition: keep the reporter armed ---------- */
+
+          typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
+          typedef void (*sighandler_fn)(int);
+          typedef sighandler_fn (*signal_fn)(int, sighandler_fn);
+
+          static sigaction_fn real_sigaction;
+          static signal_fn real_signal;
+
+          static void
+          init_real(void)
+          {
+            if (!real_sigaction) real_sigaction = (sigaction_fn)dlsym(RTLD_NEXT, "sigaction");
+            if (!real_signal) real_signal = (signal_fn)dlsym(RTLD_NEXT, "signal");
+          }
+
+          static const void *
+          act_handler(const struct sigaction *act)
+          {
+            if (act->sa_flags & SA_SIGINFO) return (const void *)act->sa_sigaction;
+            return (const void *)act->sa_handler;
+          }
+
+          static int
+          is_foreign_handler(const void *want)
+          {
+            return want != (const void *)SIG_DFL && want != (const void *)SIG_IGN &&
+                   want != (const void *)crash_handler;
+          }
+
+          static void
+          log_refused(const char *what, int sig, const void *want)
+          {
+            void *bt[8];
+            int n, i;
+
+            putf("SUPPRESS %s sig=%d handler=%p refused (bt-printer keeps its own)\n",
+                 what, sig, want);
+            n = backtrace(bt, 8);
+            for (i = 0; i < n; i++) putf("SUPPRESS-BT[%d]=%p\n", i, bt[i]);
+          }
+
+          int
+          sigaction(int signum, const struct sigaction *act, struct sigaction *oldact)
+          {
+            init_real();
+            if (!real_sigaction) return -1;
+            if (act && is_fatal(signum)) {
+              const void *want = act_handler(act);
+              if (is_foreign_handler(want)) {
+                log_refused("sigaction", signum, want);
+                return real_sigaction(signum, NULL, oldact); /* report the live one */
+              }
+              if (want != (const void *)crash_handler)
+                putf("NOTE sigaction sig=%d -> SIG_DFL/SIG_IGN honoured (reporter may lose this signal)\n",
+                     signum);
+            }
+            return real_sigaction(signum, act, oldact);
+          }
+
+          static sighandler_fn
+          current_handler(int sig)
+          {
+            struct sigaction cur;
+            if (real_sigaction && real_sigaction(sig, NULL, &cur) == 0) return cur.sa_handler;
+            return SIG_DFL;
+          }
+
+          sighandler_fn
+          signal(int signum, sighandler_fn h)
+          {
+            init_real();
+            if (is_fatal(signum) && is_foreign_handler((const void *)h)) {
+              log_refused("signal", signum, (const void *)h);
+              return current_handler(signum);
+            }
+            if (real_signal) return real_signal(signum, h);
+            return SIG_ERR;
+          }
+
+          /* ---------- load-time arming ---------- */
+
+          __attribute__((constructor)) static void
+          arm_reporter(void)
+          {
+            struct sigaction sa;
+            int i;
+
+            init_real();
+            put("bt-printer: armed (LD_PRELOAD)\n", 31);
+            memset(&sa, 0, sizeof(sa));
+            sa.sa_sigaction = crash_handler;
+            sa.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_NODEFER;
+            sigemptyset(&sa.sa_mask);
+            for (i = 0; i < FATAL_N; i++)
+              if (real_sigaction) real_sigaction(fatal_sigs[i], &sa, NULL);
+            dl_iterate_phdr(mod_cb, NULL); /* startup map: handler-proof anchor */
+            put("MODULES-DONE\n", 13);
+          }
+          BT_PRINTER_C_EOF
+
+          # In-image post-processor: maps frame addresses to (module, offset,
+          # function) using the libs that only exist inside the image.
+          cat > "${W}/bt-symbolize.py" <<'BT_SYMBOLIZE_PY_EOF'
+          #!/usr/bin/env python3
+          """bt-symbolize.py -- symbolize a bt-printer capture (stdlib only).
+
+          Usage: python3 bt-symbolize.py <capture> [<out-file>]
+
+          Consumes: MOD <path|<main>> base=0x.. [lo=0x..] [hi=0x..], BT[<i>]=0x..,
+          SUPPRESS-BT[<i>]=0x.., PC=0x.., FAULT=0x.., EXE=<path>.
+          For every frame: addr -> module with lo <= addr < hi (a missing lo/hi
+          falls back to readelf -lW; a still-unbounded range is flagged GUESS),
+          offset = addr - base (the form addr2line expects), name via
+          `addr2line -f -C`; on "??" (stripped release libtorch) a binary search
+          over `nm -D -S --defined-only -C <lib>`. Never raises on bad input.
+
+          Emits: SYMBOLIZED FRAMES (primary lines "#<i> <lib>+0x<off> <fn>"),
+          DETAIL (#<i> raw=.. mod=.. off=.. low12=.. via=.. src=..),
+          RECORDED SIGNATURE CHECK, and machine-readable
+          SYMBOLIZE_SUMMARY:<KEY>=<VALUE> lines for the workflow verdict matrix.
+          """
+          import bisect
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+
+          MOD_RE = re.compile(
+              r'^MOD\s+(?P<name>\S*)\s+base=0x(?P<base>[0-9a-fA-F]+)'
+              r'(?:\s+lo=0x(?P<lo>[0-9a-fA-F]+))?(?:\s+hi=0x(?P<hi>[0-9a-fA-F]+))?')
+          FRAME_RE = re.compile(r'^(?P<tag>SUPPRESS-)?BT\[(?P<idx>-?\d+)\]=(?P<addr>0x[0-9a-fA-F]+)')
+          PC_RE = re.compile(r'^PC=0x(?P<addr>[0-9a-fA-F]+)')
+          FAULT_RE = re.compile(r'^FAULT=0x(?P<addr>[0-9a-fA-F]+)')
+          EXE_RE = re.compile(r'^EXE=(?P<path>.+)$')
+
+          # The recorded crash-point signature (low 12 bits of the faulting PCs,
+          # constant across every configuration; runs 38682037203/38707255454).
+          RECORDED_LOW12 = (0x960, 0xac5, 0x51f)
+
+          ADDR2LINE = shutil.which('addr2line')
+          NM = shutil.which('nm')
+          READELF = shutil.which('readelf')
+
+
+          def parse_capture(path):
+              mods, frames, meta = [], [], {}
+              with open(path, 'r', errors='replace') as fh:
+                  for line in fh:
+                      line = line.rstrip('\n')
+                      m = MOD_RE.match(line)
+                      if m:
+                          base = int(m.group('base'), 16)
+                          lo = int(m.group('lo'), 16) if m.group('lo') else None
+                          hi = int(m.group('hi'), 16) if m.group('hi') else None
+                          mods.append({'name': m.group('name') or '<empty>',
+                                       'base': base, 'lo': lo, 'hi': hi})
+                          continue
+                      m = FRAME_RE.match(line)
+                      if m:
+                          frames.append({'label': ('S' if m.group('tag') else '#') + m.group('idx'),
+                                         'raw': int(m.group('addr'), 16),
+                                         'suppress': bool(m.group('tag'))})
+                          continue
+                      m = PC_RE.match(line)
+                      if m:
+                          frames.append({'label': 'PC', 'raw': int(m.group('addr'), 16),
+                                         'suppress': False})
+                          continue
+                      m = FAULT_RE.match(line)
+                      if m:
+                          meta['FAULT'] = int(m.group('addr'), 16)
+                          continue
+                      m = EXE_RE.match(line)
+                      if m:
+                          meta['EXE'] = m.group('path')
+                          continue
+              # dedupe modules by (name, base) -- load-time and crash-time dumps
+              seen, uniq = set(), []
+              for mod in mods:
+                  key = (mod['name'], mod['base'])
+                  if key in seen:
+                      continue
+                  seen.add(key)
+                  uniq.append(mod)
+              # stable order: largest lo first for the range walk below
+              uniq.sort(key=lambda m: (m['lo'] if m['lo'] is not None else m['base']))
+              return uniq, frames, meta
+
+
+          def readelf_range(path):
+              """Fallback for a MOD line without lo/hi: PT_LOAD extent from readelf."""
+              if READELF is None:
+                  return None, None
+              try:
+                  out = subprocess.run([READELF, '-lW', path], capture_output=True,
+                                       text=True, timeout=120).stdout
+              except Exception:
+                  return None, None
+              lo = hi = None
+              for line in out.splitlines():
+                  f = line.split()
+                  if len(f) >= 6 and f[0] == 'LOAD':
+                      try:
+                          vaddr, memsz = int(f[2], 16), int(f[5], 16)
+                      except ValueError:
+                          continue
+                      a, b = vaddr, vaddr + memsz
+                      lo = a if lo is None else min(lo, a)
+                      hi = b if hi is None else max(hi, b)
+              return lo, hi
+
+
+          def known_range(mod, cache):
+              """[lo, hi) of a MOD entry, or None when it must be derived/GUESSed."""
+              if mod['lo'] is not None and mod['hi'] is not None:
+                  return mod['lo'], mod['hi']
+              key = id(mod)
+              if key not in cache:
+                  base = mod['base']
+                  rlo, rhi = readelf_range(mod['name'])
+                  cache[key] = (base + rlo, base + rhi) if rlo is not None else None
+              return cache[key]
+
+
+          def frame_module(mods, addr, cache):
+              """addr -> (module, lo, hi); hi is None when the range is a GUESS.
+
+              Two passes: explicit/readelf ranges first (authoritative), then
+              lo/hi-less entries bounded by the next module's base -- an
+              unbounded guess would swallow unrelated high addresses and turn a
+              genuinely unmapped frame into a wrong attribution.
+              """
+              for mod in mods:
+                  rng = known_range(mod, cache)
+                  if rng is not None and rng[0] <= addr < rng[1]:
+                      return mod, rng[0], rng[1]
+              for i, mod in enumerate(mods):
+                  if known_range(mod, cache) is not None:
+                      continue
+                  base = mod['base']
+                  nxt = None
+                  for nmod in mods[i + 1:]:
+                      nrng = known_range(nmod, cache)
+                      nlo = nrng[0] if nrng is not None else nmod['base']
+                      if nlo > base:
+                          nxt = nlo
+                          break
+                  hi = nxt if nxt is not None else base + (1 << 40)
+                  if base <= addr < hi:
+                      return mod, base, None
+              return None, None, None
+
+
+          _nm_cache = {}
+          # code symbols only: a data symbol must never be offered as the
+          # function of a crash frame (libc/libtorch dynamic tables carry both)
+          TEXT_TYPES = 'TtWwIi'
+
+
+          def nm_table(path, dynamic=True):
+              key = (path, dynamic)
+              if key in _nm_cache:
+                  return _nm_cache[key]
+              syms = []
+              if NM is not None and os.path.exists(path):
+                  argv = [NM, '-D', '-S', '--defined-only', '-C', path] if dynamic \
+                      else [NM, '-S', '--defined-only', '-C', path]
+                  try:
+                      out = subprocess.run(argv, capture_output=True, text=True,
+                                           timeout=900).stdout
+                  except Exception:
+                      out = ''
+                  for line in out.splitlines():
+                      parts = line.split(None, 3)
+                      if len(parts) < 3:
+                          continue
+                      try:
+                          addr = int(parts[0], 16)
+                      except ValueError:
+                          continue
+                      rest = parts[1:]
+                      size, typ, name = 0, rest[0], ' '.join(rest[1:])
+                      if len(rest) == 3 and re.fullmatch(r'[0-9a-fA-F]+', rest[0]):
+                          size = int(rest[0], 16)
+                          typ, name = rest[1], rest[2]
+                      if not name or typ not in TEXT_TYPES:
+                          continue
+                      syms.append((addr, size, typ, name))
+              syms.sort(key=lambda s: s[0])
+              _nm_cache[key] = syms
+              return syms
+
+
+          def _nm_search(syms, off):
+              if not syms:
+                  return None
+              addrs = [s[0] for s in syms]
+              i = bisect.bisect_right(addrs, off) - 1
+              if i < 0:
+                  return None
+              addr, size, _typ, name = syms[i]
+              if size and off >= addr + size:
+                  return None  # in a hole between symbols: refuse to guess
+              return name
+
+
+          def nm_lookup(path, off):
+              """Dynamic symbols first (release libtorch is stripped of .symtab);
+              the full symtab is the second tier, for unstripped binaries such
+              as cp2k.psmp."""
+              name = _nm_search(nm_table(path, True), off)
+              if name:
+                  return name
+              return _nm_search(nm_table(path, False), off)
+
+
+          def nearby(path, off, want=3):
+              """Function-boundary context for a frame no symbol covers: the
+              reader still learns which function the offset sits in."""
+              out = []
+              for dynamic in (True, False):
+                  syms = nm_table(path, dynamic)
+                  if not syms:
+                      continue
+                  addrs = [s[0] for s in syms]
+                  i = bisect.bisect_right(addrs, off)
+                  for j in range(max(0, i - want), i):
+                      addr, size, _typ, name = syms[j]
+                      out.append('sym=0x%x size=0x%x name=%s' % (addr, size, name))
+                  if out:
+                      break
+              return out
+
+
+          def a2l(path, off):
+              if ADDR2LINE is None:
+                  return None
+              try:
+                  r = subprocess.run([ADDR2LINE, '-f', '-C', '-e', path, '0x%x' % off],
+                                     capture_output=True, text=True, timeout=300)
+              except Exception:
+                  return None
+              lines = [l.strip() for l in r.stdout.splitlines()]
+              if len(lines) >= 2 and lines[0] and lines[0] != '??':
+                  return lines[0], lines[1]
+              return None
+
+
+          def symbolize(path, off, name_cache, fn_cache):
+              if path not in name_cache:
+                  name_cache[path] = os.path.basename(path) if path else path
+              lib = name_cache[path]
+              key = (path, off)
+              if key in fn_cache:
+                  fn, src, via = fn_cache[key]
+              else:
+                  res = a2l(path, off)
+                  if res:
+                      fn, src, via = res[0], res[1], 'addr2line'
+                  else:
+                      nm_name = nm_lookup(path, off)
+                      if nm_name:
+                          fn, src, via = nm_name, 'nm-dynsym', 'nm'
+                      else:
+                          fn, src, via = '<no-symbol>', '-', 'none'
+                  fn_cache[key] = (fn, src, via)
+              return lib, fn, src, via
+
+
+          def main(argv):
+              if len(argv) < 2:
+                  print('SYMBOLIZE_VERDICT:FAIL no capture argument')
+                  return 2
+              cap = argv[1]
+              out_path = argv[2] if len(argv) > 2 else None
+              out_lines = []
+
+              def emit(s):
+                  out_lines.append(s)
+
+              if not os.path.exists(cap):
+                  emit('SYMBOLIZE_VERDICT:FAIL capture missing: %s' % cap)
+                  sys.stdout.write('\n'.join(out_lines) + '\n')
+                  if out_path:
+                      with open(out_path, 'w') as fh:
+                          fh.write('\n'.join(out_lines) + '\n')
+                  return 2
+
+              mods, frames, meta = parse_capture(cap)
+              emit('SYMBOLIZED-LIST (capture=%s modules=%d frames=%d tools: addr2line=%s nm=%s readelf=%s)'
+                   % (os.path.basename(cap), len(mods), len(frames),
+                      'yes' if ADDR2LINE else 'NO', 'yes' if NM else 'NO',
+                      'yes' if READELF else 'NO'))
+              emit('===== SYMBOLIZED FRAMES =====')
+
+              name_cache, fn_cache, rng_cache = {}, {}, {}
+              mapped = unmapped = torch_frames = torch_named = 0
+              low12s, hit_frames = [], {}
+              for fr in frames:
+                  mod, lo, hi = frame_module(mods, fr['raw'], rng_cache)
+                  if mod is None:
+                      unmapped += 1
+                      emit('%s <unmapped> raw=0x%x (outside every MOD range)' % (fr['label'], fr['raw']))
+                      continue
+                  mapped += 1
+                  path = mod['name']
+                  if path in ('<main>', '<empty>'):
+                      path = meta.get('EXE', path)
+                  off = fr['raw'] - mod['base']
+                  low12 = off & 0xfff
+                  low12s.append(low12)
+                  lib, fn, src, via = symbolize(path, off, name_cache, fn_cache)
+                  torch = 'torch' in lib.lower()
+                  if torch:
+                      torch_frames += 1
+                      if fn not in ('<no-symbol>',):
+                          torch_named += 1
+                  tag = ''
+                  if low12 in RECORDED_LOW12:
+                      hit_frames.setdefault(low12, []).append(fr['label'])
+                      tag = ' [low12=0x%03x RECORDED]' % low12
+                  if hi is None:
+                      tag += ' [GUESS-RANGE: MOD had no lo/hi and readelf could not derive one]'
+                  emit('%s %s+0x%x %s%s' % (fr['label'], lib, off, fn, tag))
+                  if fn == '<no-symbol>':
+                      for nline in nearby(path, off):
+                          emit('    NEARBY %s off=0x%x %s' % (fr['label'], off, nline))
+
+              emit('===== DETAIL =====')
+              for fr in frames:
+                  mod, lo, hi = frame_module(mods, fr['raw'], rng_cache)
+                  if mod is None:
+                      emit('DETAIL %s raw=0x%x mod=<unmapped> low12=0x%03x'
+                           % (fr['label'], fr['raw'], fr['raw'] & 0xfff))
+                      continue
+                  path = mod['name']
+                  if path in ('<main>', '<empty>'):
+                      path = meta.get('EXE', path)
+                  off = fr['raw'] - mod['base']
+                  _lib, fn, src, via = symbolize(path, off, name_cache, fn_cache)
+                  emit('DETAIL %s raw=0x%x mod=%s base=0x%x off=0x%x low12=0x%03x via=%s src=%s'
+                       % (fr['label'], fr['raw'], mod['name'], mod['base'], off,
+                          off & 0xfff, via, src))
+
+              emit('===== RECORDED SIGNATURE CHECK (crash-point low-12 bits) =====')
+              hits = 0
+              for val in RECORDED_LOW12:
+                  if val in hit_frames:
+                      hits += 1
+                      emit('SIGNATURE 0x%03x: hit by %s' % (val, ', '.join(hit_frames[val])))
+                  else:
+                      emit('SIGNATURE 0x%03x: not found in this capture' % val)
+              if meta.get('FAULT') is not None:
+                  emit('FAULT_ADDR 0x%x' % meta['FAULT'])
+
+              lows = sorted(set(low12s))
+              emit('===== SYMBOLIZE_SUMMARY =====')
+              emit('SYMBOLIZE_SUMMARY:TOTAL=%d' % len(frames))
+              emit('SYMBOLIZE_SUMMARY:MAPPED=%d' % mapped)
+              emit('SYMBOLIZE_SUMMARY:UNMAPPED=%d' % unmapped)
+              emit('SYMBOLIZE_SUMMARY:LIBTORCH_FRAMES=%d' % torch_frames)
+              emit('SYMBOLIZE_SUMMARY:LIBTORCH_NAMED=%d' % torch_named)
+              emit('SYMBOLIZE_SUMMARY:LOW12_LIST=%s' % ','.join('0x%03x' % v for v in lows))
+              for val in RECORDED_LOW12:
+                  emit('SYMBOLIZE_SUMMARY:SIGNATURE_%03X=%s'
+                       % (val, 'yes' if val in hit_frames else 'no'))
+              emit('SYMBOLIZE_SUMMARY:HITS=%d' % hits)
+              emit('SYMBOLIZE_VERDICT:PASS' if mapped else 'SYMBOLIZE_VERDICT:FAIL no frame mapped')
+
+              text = '\n'.join(out_lines) + '\n'
+              sys.stdout.write(text)
+              if out_path:
+                  with open(out_path, 'w') as fh:
+                      fh.write(text)
+              return 0
+
+
+          if __name__ == '__main__':
+              sys.exit(main(sys.argv))
+          BT_SYMBOLIZE_PY_EOF
+
+          python3 -m py_compile "${W}/bt-symbolize.py" && echo "PY_SYNTAX_OK"
+          echo "BT_PRINTER_C_BYTES=$(wc -c < "${W}/bt-printer.c") BT_SYMBOLIZE_PY_BYTES=$(wc -c < "${W}/bt-symbolize.py")"
+          sha256sum "${W}/bt-printer.c" "${W}/bt-symbolize.py"
+          grep -q 'crash_handler' "${W}/bt-printer.c" || { echo "WRITE_VERDICT:FAIL heredoc lost content"; exit 1; }
+          echo "WRITE_VERDICT:PASS"
+
+      # ---- stage 3: the two crash captures (baseline + preload) -----------
+      # Expected: rc=139 for both (the crash is deterministic). The preload
+      # run must add SIG=11 + BT[] + MOD lines on fd 2; the baseline run is the
+      # same-image reference for the crash-point check (low-12 comparison).
+      # All `docker run`s are timeout-bounded so a hang cannot eat the job.
+      - name: "stage 3: crash captures (baseline + LD_PRELOAD bt-printer; expect rc=139)"
+        id: capture
+        if: always() && steps.build.outcome == 'success'
+        timeout-minutes: 25
+        run: |
+          set -uo pipefail
+          W="${PWD}/ci/cp2k-tests"
+          IMAGE="${PROBE_IMAGE}"
+          echo "===== tooling facts inside the probe image ====="
+          timeout 300 docker run --rm -v "${W}:/work" -w /work "${IMAGE}" bash -c '
+            set -u
+            C="$(command -v cp2k || true)"
+            echo "cp2k_path=${C:-MISSING}"
+            if [ -n "${C}" ]; then
+              if head -c 2 "${C}" 2>/dev/null | grep -q "#!"; then
+                echo "cp2k_is_script=yes"
+                grep -nE "exec|cp2k.psmp" "${C}" 2>/dev/null | head -n 5 || true
+              else
+                echo "cp2k_is_script=no"
+              fi
+            fi
+            echo "gcc=$(gcc --version 2>/dev/null | head -n 1 || echo MISSING)"
+            echo "python3=$(python3 --version 2>&1 || echo MISSING)"
+            echo "addr2line=$(command -v addr2line || echo MISSING)"
+            echo "nm=$(command -v nm || echo MISSING)"
+            echo "readelf=$(command -v readelf || echo MISSING)"
+            echo "file=$(command -v file || echo MISSING)"
+            echo "libSegFault=$(find /lib /usr/lib -maxdepth 2 -name "libSegFault.so*" 2>/dev/null | head -n 1 || true)"
+            echo "gdb=$(command -v gdb || echo MISSING)"
+            echo "glibc=$(ldd --version 2>/dev/null | head -n 1 || echo NA)"
+            echo "psmp_present=$([ -x /opt/cp2k/install/bin/cp2k.psmp ] && echo yes || echo no)"
+            ls -l /opt/cp2k/data/DeePMD/water_dpa2.pth 2>/dev/null || echo "deepmd_model=ABSENT"
+            echo "gomp_maps=$(ldd /opt/cp2k/install/bin/cp2k.psmp 2>/dev/null | grep -c gomp || true)"
+          ' 2>&1 | tee bt-tooling.txt || true
+
+          echo "===== BASELINE run (no preload; recorded-style addresses) ====="
+          timeout 900 docker run --rm --shm-size=1g -v "${W}:/work" -w /work "${IMAGE}" bash -c '
+            rc=0
+            cp2k -i deepmd-water.inp -o /work/bt-baseline.out 2> /work/bt-baseline-stderr.txt || rc=$?
+            echo "BASELINE_RUN_RC=${rc}"
+            exit 0
+          ' 2>&1 | tee bt-baseline-console.txt || true
+
+          echo "===== PRELOAD run (bt-printer.so; BT/PC/MOD dump expected) ====="
+          timeout 900 docker run --rm --shm-size=1g -v "${W}:/work" -w /work "${IMAGE}" bash -c '
+            set -u
+            if ! command -v gcc >/dev/null 2>&1; then
+              echo "PRELOAD_VERDICT:FAIL gcc not present in the probe image"
+              exit 0
+            fi
+            gcc -shared -fPIC -O1 -Wall -o /work/bt-printer.so /work/bt-printer.c -ldl 2> /work/bt-gcc-stderr.txt
+            grc=$?
+            echo "GCC_RC=${grc}"
+            if [ "${grc}" -ne 0 ]; then
+              echo "PRELOAD_VERDICT:FAIL gcc compile failed (see bt-gcc-stderr.txt)"
+              sed -n "1,40p" /work/bt-gcc-stderr.txt || true
+              exit 0
+            fi
+            echo "BT_PRINTER_SO_SHA256=$(sha256sum /work/bt-printer.so | cut -d" " -f1)"
+            rc=0
+            LD_PRELOAD=/work/bt-printer.so cp2k -i deepmd-water.inp -o /work/bt-run.out 2> /work/bt-stderr.txt || rc=$?
+            echo "PRELOAD_RUN_RC=${rc}"
+            echo "BT_STDERR_LINES=$(wc -l < /work/bt-stderr.txt)"
+            echo "BT_STDERR_BT=$(grep -c "^BT\[" /work/bt-stderr.txt || true)"
+            echo "BT_STDERR_MOD=$(grep -c "^MOD " /work/bt-stderr.txt || true)"
+            echo "BT_STDERR_SIG=$(grep -c "^SIG=" /work/bt-stderr.txt || true)"
+            echo "BT_STDERR_SUPPRESS=$(grep -c "^SUPPRESS " /work/bt-stderr.txt || true)"
+            echo "--- bt-stderr.txt: first 12 / last 12 lines ---"
+            head -n 12 /work/bt-stderr.txt || true
+            echo "..."
+            tail -n 12 /work/bt-stderr.txt || true
+            exit 0
+          ' 2>&1 | tee bt-preload-console.txt || true
+
+          echo "===== PRELOAD run under mpirun -np 1 (historical harness; independent capture) ====="
+          timeout 900 docker run --rm --shm-size=1g -v "${W}:/work" -w /work "${IMAGE}" bash -c '
+            rc=0
+            LD_PRELOAD=/work/bt-printer.so mpirun -np 1 env LD_PRELOAD=/work/bt-printer.so cp2k -i deepmd-water.inp -o /work/bt-run-mpi.out 2> /work/bt-stderr-mpi.txt || rc=$?
+            echo "PRELOAD_MPI_RUN_RC=${rc}"
+            echo "BT_STDERR_MPI_BT=$(grep -c "^BT\[" /work/bt-stderr-mpi.txt || true)"
+            echo "BT_STDERR_MPI_SIG=$(grep -c "^SIG=" /work/bt-stderr-mpi.txt || true)"
+            exit 0
+          ' 2>&1 | tee bt-preload-mpi-console.txt || true
+
+          echo "===== capture facts (host side) ====="
+          baseline_rc="$(sed -n 's/^BASELINE_RUN_RC=//p' bt-baseline-console.txt 2>/dev/null | tail -1)"
+          preload_rc="$(sed -n 's/^PRELOAD_RUN_RC=//p' bt-preload-console.txt 2>/dev/null | tail -1)"
+          mpi_rc="$(sed -n 's/^PRELOAD_MPI_RUN_RC=//p' bt-preload-mpi-console.txt 2>/dev/null | tail -1)"
+          sig_line="$(grep -m1 '^SIG=' "${W}/bt-stderr.txt" 2>/dev/null || true)"
+          bt_frames="$(grep -c '^BT\[' "${W}/bt-stderr.txt" 2>/dev/null || true)"
+          suppress="$(grep -c '^SUPPRESS ' "${W}/bt-stderr.txt" 2>/dev/null || true)"
+          grep -hEo '#[0-9]+ +0x[0-9a-fA-F]+' "${W}"/bt-baseline-stderr.txt "${W}"/bt-baseline.out 2>/dev/null | grep -oE '0x[0-9a-fA-F]+' | sort -u | tee bt-baseline-addr.txt || true
+          {
+            echo "BASELINE_RUN_RC=${baseline_rc:-NA}"
+            echo "PRELOAD_RUN_RC=${preload_rc:-NA}"
+            echo "PRELOAD_MPI_RUN_RC=${mpi_rc:-NA}"
+            echo "PRELOAD_SIG=${sig_line:-NA}"
+            echo "PRELOAD_BT_FRAMES=${bt_frames:-0}"
+            echo "PRELOAD_SUPPRESS=${suppress:-0}"
+          } | tee bt-run-verdict.txt
+
+          if [ "${preload_rc:-NA}" = "139" ] && [ "${sig_line:-NA}" = "SIG=11" ] && [ "${bt_frames:-0}" -gt 0 ]; then
+            echo "CAPTURE_VERDICT:PASS"
+            echo "CAPTURE_DETAIL: preload rc=139, SIG=11, ${bt_frames} frame lines captured"
+            exit 0
+          fi
+          echo "CAPTURE_VERDICT:FAIL"
+          echo "CAPTURE_DETAIL: preload_rc=${preload_rc:-NA} sig=${sig_line:-NA} frames=${bt_frames:-0} suppresses=${suppress:-0}; compare baseline rc=${baseline_rc:-NA} (expect 139) and read the fallback steps"
+          exit 1
+
+      # ---- stage 4: symbolize in-image (addr2line -> nm dynsym fallback) --
+      # The .so files exist only inside the image, so the post-processor runs
+      # there. python3/binutils are installed best-effort when absent; the
+      # console records which tools were used.
+      - name: "stage 4: in-image symbolization (addr2line -> nm fallback)"
+        id: symbolize
+        if: always() && steps.build.outcome == 'success'
+        timeout-minutes: 20
+        run: |
+          set -uo pipefail
+          W="${PWD}/ci/cp2k-tests"
+          IMAGE="${PROBE_IMAGE}"
+          timeout 900 docker run --rm -v "${W}:/work" -w /work "${IMAGE}" bash -c '
+            set -u
+            if ! command -v python3 >/dev/null 2>&1; then
+              echo "SYMBOLIZE: python3 absent, installing (best effort)"
+              { apt-get update -qq && apt-get install -y -qq --no-install-recommends python3; } > /work/bt-sym-apt.log 2>&1 \
+                || echo "SYMBOLIZE_APT_FAILED python3 (see bt-sym-apt.log)"
+            fi
+            if ! command -v addr2line >/dev/null 2>&1 || ! command -v nm >/dev/null 2>&1; then
+              echo "SYMBOLIZE: binutils incomplete, installing (best effort)"
+              { apt-get update -qq && apt-get install -y -qq --no-install-recommends binutils; } >> /work/bt-sym-apt.log 2>&1 \
+                || echo "SYMBOLIZE_APT_FAILED binutils (see bt-sym-apt.log)"
+            fi
+            if ! command -v python3 >/dev/null 2>&1; then
+              echo "SYMBOLIZE_VERDICT:FAIL no python3 in the image and the install failed"
+              tail -n 20 /work/bt-sym-apt.log 2>/dev/null || true
+              exit 0
+            fi
+            echo "SYMBOLIZE_TOOLS python3=$(command -v python3) addr2line=$(command -v addr2line || echo MISSING) nm=$(command -v nm || echo MISSING) readelf=$(command -v readelf || echo MISSING)"
+            if [ -s /work/bt-stderr.txt ]; then
+              echo "===== symbolize primary capture: bt-stderr.txt ====="
+              python3 /work/bt-symbolize.py /work/bt-stderr.txt /work/bt-symbolized.txt
+              echo "SYMBOLIZE_EXIT=$?"
+            else
+              echo "SYMBOLIZE_VERDICT:FAIL primary capture /work/bt-stderr.txt missing (stage 3 did not capture)"
+            fi
+            if [ -s /work/bt-stderr-mpi.txt ]; then
+              echo "===== symbolize mpirun capture: bt-stderr-mpi.txt ====="
+              python3 /work/bt-symbolize.py /work/bt-stderr-mpi.txt /work/bt-symbolized-mpi.txt
+              echo "SYMBOLIZE_MPI_EXIT=$?"
+            else
+              echo "SYMBOLIZE_NOTE: no mpirun capture to symbolize"
+            fi
+            exit 0
+          ' 2>&1 | tee bt-symbolize-console.txt || true
+          if [ -s "${W}/bt-symbolized.txt" ]; then
+            echo "SYMBOLIZE_STEP:PASS bt-symbolized.txt written"
+          else
+            echo "SYMBOLIZE_STEP:CHECK no bt-symbolized.txt (see bt-symbolize-console.txt)"
+          fi
+
+      # ---- stage 5a: fallback -- libSegFault.so (informational) -----------
+      # Kept because the task asks for it and because absence is itself a fact;
+      # note it is constructor-based, so it is expected to be displaced by the
+      # libgfortran handler exactly like a naive preload would be.
+      - name: "stage 5a: fallback libSegFault.so (conditional; informational)"
+        id: libsegfault
+        if: always() && steps.build.outcome == 'success'
+        timeout-minutes: 15
+        run: |
+          set -uo pipefail
+          W="${PWD}/ci/cp2k-tests"
+          IMAGE="${PROBE_IMAGE}"
+          timeout 900 docker run --rm --shm-size=1g -v "${W}:/work" -w /work "${IMAGE}" bash -c '
+            set -u
+            LS="$(find /lib /usr/lib -maxdepth 2 -name "libSegFault.so*" 2>/dev/null | head -n 1 || true)"
+            if [ -z "${LS}" ]; then
+              echo "LIBSEGFAULT:absent (glibc >= 2.35 dropped libSegFault.so; nothing to run)"
+              exit 0
+            fi
+            echo "LIBSEGFAULT:present path=${LS}"
+            rc=0
+            LD_PRELOAD="${LS}" cp2k -i deepmd-water.inp -o /work/bt-libsegfault.out 2> /work/bt-libsegfault-stderr.txt || rc=$?
+            echo "LIBSEGFAULT_RUN_RC=${rc}"
+            echo "LIBSEGFAULT_LINES=$(wc -l < /work/bt-libsegfault-stderr.txt)"
+            sed -n "1,25p" /work/bt-libsegfault-stderr.txt || true
+            exit 0
+          ' 2>&1 | tee bt-libsegfault-console.txt || true
+
+      # ---- stage 5b: fallback -- gdb (informational; apt logs retained) ---
+      # --cap-add=SYS_PTRACE: docker's default seccomp profile denies ptrace
+      # without CAP_SYS_PTRACE -- a plausible cause of the two earlier silent
+      # gdb attempts, hence the explicit capability and the ptrace self-test
+      # (a "gdb cannot trace here" is then distinguishable from "gdb ran and
+      # the crash produced no frames"). Target resolution prefers the real
+      # ELF (cp2k may be a wrapper script; gdb on a script would be useless).
+      - name: "stage 5b: fallback gdb bt (apt logs retained; informational)"
+        id: gdb
+        if: always() && steps.build.outcome == 'success'
+        timeout-minutes: 30
+        run: |
+          set -uo pipefail
+          W="${PWD}/ci/cp2k-tests"
+          IMAGE="${PROBE_IMAGE}"
+          timeout 1500 docker run --rm --shm-size=1g --cap-add=SYS_PTRACE -v "${W}:/work" -w /work "${IMAGE}" bash -c '
+            set -u
+            if ! command -v gdb >/dev/null 2>&1; then
+              echo "GDB: installing (apt logs kept on purpose)"
+              apt-get update > /work/apt-apt.log 2>&1
+              apt-get install -y gdb >> /work/apt-apt.log 2>&1
+              echo "GDB_APT_RC=$?"
+            fi
+            if ! command -v gdb >/dev/null 2>&1; then
+              echo "GDB:absent (install failed; tail of apt-apt.log follows)"
+              tail -n 20 /work/apt-apt.log 2>/dev/null || true
+              exit 0
+            fi
+            echo "GDB_VERSION=$(gdb --version 2>&1 | head -n 1)"
+            echo "PTRACE_SCOPE=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo NA)"
+            echo "===== gdb ptrace self-test (kill -SEGV in a trivial program) ====="
+            timeout 120 gdb -batch -ex "set pagination off" -ex run -ex "bt 5" -- /bin/sh -c "kill -SEGV \$\$" > /work/gdb-selftest.txt 2>&1
+            echo "GDB_SELFTEST_RC=$?"
+            grep -cE "^#[0-9]+ " /work/gdb-selftest.txt 2>/dev/null || echo 0
+            sed -n "1,12p" /work/gdb-selftest.txt || true
+            echo "===== gdb run: deepmd-water ====="
+            TARGET=/opt/cp2k/install/bin/cp2k.psmp
+            if [ ! -x "${TARGET}" ]; then TARGET="$(command -v cp2k)"; fi
+            echo "GDB_TARGET=${TARGET}"
+            timeout 900 gdb -batch -ex "set pagination off" -ex "set confirm off" -ex run -ex "bt 30" -ex "info sharedlibrary" -- "${TARGET}" -i deepmd-water.inp -o /work/bt-gdb.out 2>&1 | tee /work/gdb-log.txt
+            echo "GDB_MAIN_RC=$?"
+            echo "GDB_BT_FRAMES=$(grep -cE "^#[0-9]+ " /work/gdb-log.txt 2>/dev/null || echo 0)"
+            grep -m5 -E "^#[0-9]+ " /work/gdb-log.txt 2>/dev/null || true
+            exit 0
+          ' 2>&1 | tee bt-gdb-console.txt || true
+          echo "GDB_STEP:done"
+
+      # ---- verdict matrix (always; never fails the job) -------------------
+      - name: "probe verdict matrix (summary; never fails)"
+        if: always()
+        run: |
+          set -uo pipefail
+          W=ci/cp2k-tests
+          build="${{ steps.build.outcome }}"
+          write="${{ steps.write.outcome }}"
+          capture="${{ steps.capture.outcome }}"
+          symbolize="${{ steps.symbolize.outcome }}"
+          libsegfault="${{ steps.libsegfault.outcome }}"
+          gdb="${{ steps.gdb.outcome }}"
+
+          preload_rc="$(sed -n 's/^PRELOAD_RUN_RC=//p' bt-preload-console.txt 2>/dev/null | tail -1)"
+          baseline_rc="$(sed -n 's/^BASELINE_RUN_RC=//p' bt-baseline-console.txt 2>/dev/null | tail -1)"
+          mpi_rc="$(sed -n 's/^PRELOAD_MPI_RUN_RC=//p' bt-preload-mpi-console.txt 2>/dev/null | tail -1)"
+          sig_line="$(grep -m1 '^SIG=' "${W}/bt-stderr.txt" 2>/dev/null || true)"
+          bt_frames="$(grep -c '^BT\[' "${W}/bt-stderr.txt" 2>/dev/null || true)"
+          mod_lines="$(grep -c '^MOD ' "${W}/bt-stderr.txt" 2>/dev/null || true)"
+          suppress="$(grep -c '^SUPPRESS ' "${W}/bt-stderr.txt" 2>/dev/null || true)"
+          pc_line="$(grep -m1 '^PC=' "${W}/bt-stderr.txt" 2>/dev/null || true)"
+          base_addrs="$(grep -hoE '0x[0-9a-fA-F]+' bt-baseline-addr.txt 2>/dev/null | tr '\n' ' ' || true)"
+
+          sym_file="${W}/bt-symbolized.txt"
+          [ -s "${sym_file}" ] || sym_file="${W}/bt-symbolized-mpi.txt"
+          s_total="$(sed -n 's/^SYMBOLIZE_SUMMARY:TOTAL=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          s_mapped="$(sed -n 's/^SYMBOLIZE_SUMMARY:MAPPED=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          s_torch="$(sed -n 's/^SYMBOLIZE_SUMMARY:LIBTORCH_FRAMES=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          s_named="$(sed -n 's/^SYMBOLIZE_SUMMARY:LIBTORCH_NAMED=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          s_hits="$(sed -n 's/^SYMBOLIZE_SUMMARY:HITS=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          s_960="$(sed -n 's/^SYMBOLIZE_SUMMARY:SIGNATURE_960=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          s_ac5="$(sed -n 's/^SYMBOLIZE_SUMMARY:SIGNATURE_AC5=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          s_51f="$(sed -n 's/^SYMBOLIZE_SUMMARY:SIGNATURE_51F=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          s_low12="$(sed -n 's/^SYMBOLIZE_SUMMARY:LOW12_LIST=//p' "${sym_file}" 2>/dev/null | tail -1)"
+          gdb_frames="$(grep -cE '^#[0-9]+ ' "${W}/gdb-log.txt" 2>/dev/null || true)"
+          gdb_selftest="$(grep -cE '^#[0-9]+ ' "${W}/gdb-selftest.txt" 2>/dev/null || true)"
+          lsf_state="$(grep -m1 '^LIBSEGFAULT:' bt-libsegfault-console.txt 2>/dev/null || true)"
+
+          # low-12 set of the baseline (recorded-style) addresses
+          base_low12=""
+          for a in ${base_addrs}; do
+            base_low12="${base_low12}$(printf '0x%03x' "$(( a & 0xfff ))"),"
+          done
+          base_low12="${base_low12%,}"
+          if [ -z "${base_low12}" ] || [ -z "${s_low12}" ]; then
+            low12_sub=NA
+          else
+            low12_sub=yes
+            for b in $(printf '%s' "${base_low12}" | tr ',' ' '); do
+              case ",${s_low12}," in *",${b},"*) ;; *) low12_sub=no ;; esac
+            done
+          fi
+
+          {
+            echo "===== PROBE_VERDICT_MATRIX (deepmd SIGSEGV diagnose) ====="
+            echo "stage1 forge2k build (image)   : ${build}"
+            echo "stage2 write probe sources     : ${write}"
+            echo "stage3 crash captures          : ${capture}"
+            echo "stage4 in-image symbolization  : ${symbolize}"
+            echo "stage5a libSegFault fallback   : ${libsegfault}"
+            echo "stage5b gdb fallback           : ${gdb}"
+            echo "----- capture facts -----"
+            echo "BASELINE_RUN_RC (no preload)   : ${baseline_rc:-NA} (expected 139)"
+            echo "PRELOAD_RUN_RC                 : ${preload_rc:-NA} (expected 139)"
+            echo "PRELOAD_MPI_RUN_RC (mpirun np1): ${mpi_rc:-NA}"
+            echo "PRELOAD_SIG_LINE               : ${sig_line:-NA}"
+            echo "PRELOAD_PC                     : ${pc_line:-NA}"
+            echo "PRELOAD_BT_FRAMES              : ${bt_frames:-0}"
+            echo "PRELOAD_MOD_LINES              : ${mod_lines:-0}"
+            echo "PRELOAD_SUPPRESSED_INSTALLS    : ${suppress:-0}"
+            echo "----- symbolization facts -----"
+            echo "SYMBOLIZE_TOTAL/MAPPED         : ${s_total:-NA}/${s_mapped:-NA}"
+            echo "LIBTORCH_FRAMES/NAMED          : ${s_torch:-NA}/${s_named:-NA}"
+            echo "SIGNATURE_960/AC5/51F          : ${s_960:-NA}/${s_ac5:-NA}/${s_51f:-NA} (hits=${s_hits:-NA})"
+            echo "BASELINE_LOW12                 : ${base_low12:-NA}"
+            echo "PRELOAD_LOW12                  : ${s_low12:-NA}"
+            echo "LOW12_SUBSET                   : ${low12_sub}"
+            echo "----- fallback facts -----"
+            echo "LIBSEGFAULT                    : ${lsf_state:-NA}"
+            echo "GDB_SELFTEST_VS_MAIN_FRAMES    : ${gdb_selftest:-0} selftest / ${gdb_frames:-0} main"
+            echo "----- symbolized libtorch frames (top 5) -----"
+            grep -m5 -E 'libtorch[^ ]*\+0x' "${sym_file}" 2>/dev/null || echo "(none)"
+          } | tee probe-diagnose-verdict.txt
+
+          verdict=FAIL_IMAGE_BUILD
+          reading="image rebuild failed; nothing else could run"
+          if [ "${build}" = "success" ] && [ "${write}" != "success" ]; then
+            verdict=FAIL_SOURCES_NOT_WRITTEN
+            reading="the probe sources were not written; nothing else could run"
+          elif [ "${build}" = "success" ]; then
+            if [ "${preload_rc:-NA}" != "139" ]; then
+              verdict=FAIL_NO_CRASH_REPRODUCED
+              reading="the preload run exited ${preload_rc:-NA}, not 139: the crash did not reproduce in this image/run; baseline rc=${baseline_rc:-NA}"
+            elif [ "${sig_line:-NA}" != "SIG=11" ] || [ "${bt_frames:-0}" -eq 0 ]; then
+              verdict=FAIL_NO_HANDLER_OUTPUT
+              reading="rc=139 but no SIG/BT dump (suppressed installs=${suppress:-0}, baseline rc=${baseline_rc:-NA}); read the baseline addresses, libSegFault and gdb evidence before reassessing"
+            elif [ "${s_named:-0}" -ge 1 ] && [ "${s_torch:-0}" -ge 1 ]; then
+              verdict=PASS_SYMBOLIZED_TRACE
+              reading="real symbolized backtrace obtained: libtorch frames with function names are in bt-symbolized.txt (module+offset+function); check SIGNATURE_* and LOW12_SUBSET for the same-crash-point confirmation"
+            elif [ "${s_torch:-0}" -ge 1 ]; then
+              verdict=PASS_OFFSETS_ONLY
+              reading="libtorch frames resolved to module+offset but no function name; the code path is pinned, the symbol needs the nm-dynsym/binary-search detail lines"
+            elif [ "${s_mapped:-0}" -ge 1 ]; then
+              verdict=PASS_PARTIAL_MAPPED
+              reading="frames mapped but none in libtorch: a different crash point than recorded; report as new information, not as success"
+            else
+              verdict=FAIL_SYMBOLIZE
+              reading="no frame could be mapped to a module; check the MOD dump and the symbolizer tool lines"
+            fi
+          fi
+          {
+            echo "PROBE_VERDICT:${verdict}"
+            echo "PROBE_VERDICT_READING: ${reading}"
+          } | tee -a probe-diagnose-verdict.txt
+
+      # Artifact path discipline (caught by the local dry run): files written
+      # by the host-side `tee` land in the repo root, files written inside the
+      # container land in the mounted ci/cp2k-tests/. Both sets are listed.
+      - name: upload probe evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-diagnose-evidence
+          path: |
+            ci/cp2k-tests/bt-printer.c
+            ci/cp2k-tests/bt-printer.so
+            ci/cp2k-tests/bt-symbolize.py
+            ci/cp2k-tests/bt-stderr.txt
+            ci/cp2k-tests/bt-symbolized.txt
+            ci/cp2k-tests/bt-stderr-mpi.txt
+            ci/cp2k-tests/bt-symbolized-mpi.txt
+            ci/cp2k-tests/bt-baseline-stderr.txt
+            ci/cp2k-tests/bt-baseline.out
+            ci/cp2k-tests/bt-run.out
+            ci/cp2k-tests/bt-run-mpi.out
+            ci/cp2k-tests/bt-gcc-stderr.txt
+            ci/cp2k-tests/bt-sym-apt.log
+            ci/cp2k-tests/bt-libsegfault-stderr.txt
+            ci/cp2k-tests/bt-libsegfault.out
+            ci/cp2k-tests/bt-gdb.out
+            ci/cp2k-tests/gdb-log.txt
+            ci/cp2k-tests/gdb-selftest.txt
+            ci/cp2k-tests/apt-apt.log
+            bt-tooling.txt
+            bt-baseline-addr.txt
+            bt-run-verdict.txt
+            bt-baseline-console.txt
+            bt-preload-console.txt
+            bt-preload-mpi-console.txt
+            bt-symbolize-console.txt
+            bt-libsegfault-console.txt
+            bt-gdb-console.txt
+            probe-diagnose-verdict.txt
+          if-no-files-found: ignore
+          retention-days: 7
