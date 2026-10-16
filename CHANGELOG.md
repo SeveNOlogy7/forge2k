@@ -18,6 +18,10 @@
 - **openPMD OFF**（失败迭代如实记录：e2e 第 1 轮 runs 38404980161 / 38405057080 双变体同点 FAIL 于 `find_package(openPMD 0.16.1 REQUIRED)`，dbcsr 补丁在该轮已验证生效）：toolchain `--install-all` 依赖集不含 openPMD，经 41 项组件对照矩阵确认其为唯一额外 OFF，追加 `-DCP2K_USE_OPENPMD=OFF` 后第 2 轮双变体 success
 - **native 2026.2 广告摘除**（对抗评审 verdict=confirmed followup）：GUI native 方法版本列表误含 2026.2，而 native release 臂仍走 `make`（`use_cmake` 仅覆盖 master）、上游 ≥2026.1 已删根 Makefile 必败，广告面与执行路径不一致——从 native 广告面移除 2026.2 并加负向断言锁定；native ≥2026.1 的 cmake 迁移与基线遗留的 2026.1 广告问题登记 backlog（README 已知限制）
 
+### Known issue（第七期 deepmd preset）
+
+- **deepmd preset 计算级测试：上游组合运行期 SIGSEGV（信息性登记）**：两轮 e2e 中构建步与 cp2kflags 硬门（含 deepmd+libtorch tokens）均 PASS，唯一未过的是计算级 `deepmd-water` 运行——rc=139 SIGSEGV，模型加载成功后计算期、np1/np2 同点（e2e runs 38682037203 / 38707255454）。两轮实验矩阵用尽后判定根因为上游 deepmd-kit 3.1.0 + libtorch 2.7.1 cxx11-abi 组合在上游未验证环境下的运行期问题：E1 gdb 无回溯输出 / E2 双 libgomp 发现→统一修复→第 2 轮逐字节同点否证（probe run 38695004330，失效修复已如实 revert，保留尝试史）/ E3 线程 env 无效；旁证为 cp2k 官方 toolchain 镜像 DEEPMD=OFF、spack 路线 pin `deepmdkit@3.1.3`。该功能测试步骤降级为信息性（`continue-on-error: true`，完整断言保留，上游修复后自动变绿）；决策记录与证据链见 `.omz/runtime/sess_11c1d90d-3960-4a86-b79e-c9a3835bab0b/results/deepmd-degrade.md`；上游 issue 上报登记 backlog（留待用户授权）。
+
 ### Documented（第七期）
 
 - README：版本行与构建方法节补 2026.2（toolchain 的 cmake 构建路径、CUDA 变体可用性）；已知限制新增两条——spack 方法暂不支持 2026.2（上游 tools/spack 重排，backlog=委托上游 make_cp2k.sh）与 2026.2 CI 验证状态（构建 + `--version` 冒烟口径，两处 deliberate workaround 登记）
