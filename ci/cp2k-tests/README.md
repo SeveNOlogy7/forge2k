@@ -62,9 +62,11 @@ cp2k's own toolchain image builds with `DEEPMD=OFF`, and the spack route pins
 `deepmdkit@3.1.3`. Filing an upstream issue is a backlog item pending user
 authorization.
 
-Decision record / full transcript:
-`.omz/runtime/sess_11c1d90d-3960-4a86-b79e-c9a3835bab0b/results/deepmd-degrade.md`;
-the refuted-fix record is in the same directory (`deepmd-gomp-fix.md`).
+Decision record / full transcript: maintainer-local
+`.omz/runtime/<stem>/results/deepmd-degrade.md` (plus the refuted-fix
+record `deepmd-gomp-fix.md` in the same directory); note `.omz/` is
+gitignored and therefore not reachable from the repository — this
+README section is the in-repo index.
 
 ## Source table
 
