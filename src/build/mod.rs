@@ -78,8 +78,11 @@ pub struct BuildConfig {
     pub no_cache: bool,
     pub shm_size: String,
     pub dockerfile: Option<PathBuf>,
-    /// Validated feature presets (`--features`), canonical registry order.
+    /// Validated feature presets (`--features`), in the order given on the CLI
+    /// (`default_tag` joins them in exactly that order).
     /// Empty = pre-feature behavior (renders byte-identical).
+    /// Reminder: when a second preset lands, sort by KNOWN_FEATURES registry
+    /// order before joining (tag determinism for `--features a,b` vs `b,a`).
     pub features: Vec<String>,
 }
 

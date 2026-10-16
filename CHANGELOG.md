@@ -20,7 +20,7 @@
 
 ### Known issue（第七期 deepmd preset）
 
-- **deepmd preset 计算级测试：上游组合运行期 SIGSEGV（信息性登记）**：两轮 e2e 中构建步与 cp2kflags 硬门（含 deepmd+libtorch tokens）均 PASS，唯一未过的是计算级 `deepmd-water` 运行——rc=139 SIGSEGV，模型加载成功后计算期、np1/np2 同点（e2e runs 38682037203 / 38707255454）。两轮实验矩阵用尽后判定根因为上游 deepmd-kit 3.1.0 + libtorch 2.7.1 cxx11-abi 组合在上游未验证环境下的运行期问题：E1 gdb 无回溯输出 / E2 双 libgomp 发现→统一修复→第 2 轮逐字节同点否证（probe run 38695004330，失效修复已如实 revert，保留尝试史）/ E3 线程 env 无效；旁证为 cp2k 官方 toolchain 镜像 DEEPMD=OFF、spack 路线 pin `deepmdkit@3.1.3`。该功能测试步骤降级为信息性（`continue-on-error: true`，完整断言保留，上游修复后自动变绿）；决策记录与证据链见 `.omz/runtime/sess_11c1d90d-3960-4a86-b79e-c9a3835bab0b/results/deepmd-degrade.md`；上游 issue 上报登记 backlog（留待用户授权）。
+- **deepmd preset 计算级测试：上游组合运行期 SIGSEGV（信息性登记）**：两轮 e2e 中构建步与 cp2kflags 硬门（含 deepmd+libtorch tokens）均 PASS，唯一未过的是计算级 `deepmd-water` 运行——rc=139 SIGSEGV，模型加载成功后计算期、np1/np2 同点（e2e runs 38682037203 / 38707255454）。两轮实验矩阵用尽后，结论指向上游（主候选）deepmd-kit 3.1.0 + libtorch 2.7.1 cxx11-abi 组合在上游未验证环境下的运行期问题（静态推断 + 第 2 轮同点复现，无 gdb 回溯支撑）：E1 gdb 无回溯输出 / E2 双 libgomp 发现→统一修复→第 2 轮逐字节同点否证（probe run 38695004330，失效修复已如实 revert，保留尝试史）/ E3 线程 env 无效；旁证为 cp2k 官方 toolchain 镜像 DEEPMD=OFF、spack 路线 pin `deepmdkit@3.1.3`。该功能测试步骤降级为信息性（`continue-on-error: true`，完整断言保留，上游修复后自动变绿）；决策记录与证据链见 `ci/cp2k-tests/README.md`（实验矩阵、run 索引与输入 pin）；上游 issue 上报登记 backlog（留待用户授权）。
 
 ### Documented（第七期）
 
