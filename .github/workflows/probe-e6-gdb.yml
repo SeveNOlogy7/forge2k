@@ -1,0 +1,76 @@
+name: deepmd gemm_batch args inspection (TEMPORARY, wave e6)
+
+# TEMPORARY probe artifact, not part of the product surface.
+#
+# Goal: inspect the corrupted task structure that the OpenBLAS gemm_batch
+# worker dereferenced (PC=0x428). gdb with the image's symbols can name the
+# field and show its value; that names the guilty filler (submitter vs API).
+# Reuses the ghcr image (pull only, no rebuild) + the kernel core-dump route
+# (SYS_RESOURCE cap + core_pattern, from the wave t1f findings).
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - probe/e6-gdb
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  e6:
+    name: gdb inspection of the gemm_batch task structure
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Login ghcr + pull prebuilt deepmd image
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull ghcr.io/sevenology7/forge2k-probe:2026.2-deepmd
+
+      - name: core_pattern + core run
+        run: |
+          set -x
+          cat /proc/sys/kernel/core_pattern | tee e6-core-pattern-before.txt
+          sudo sysctl -w kernel.core_pattern='core.%p' || sudo sh -c 'echo core.%p > /proc/sys/kernel/core_pattern'
+          cat /proc/sys/kernel/core_pattern | tee e6-core-pattern-after.txt
+          IMG=ghcr.io/sevenology7/forge2k-probe:2026.2-deepmd
+          set +e
+          docker run --rm --cap-add SYS_RESOURCE --shm-size=1g \
+            -v "$PWD/ci/cp2k-tests:/work" "$IMG" \
+            bash -c "cd /work && ulimit -c unlimited; cp2k -i deepmd-water.inp -o e6.out 2> e6.err; echo rc=\$?"
+          set -e
+          ls -la ci/cp2k-tests/core.* 2>/dev/null | tee e6-core-ls.txt || echo "NO_CORE_FILE" | tee e6-core-ls.txt
+
+      - name: "gdb: bt full + frame args dump (the money shot)"
+        run: |
+          IMG=ghcr.io/sevenology7/forge2k-probe:2026.2-deepmd
+          CORE=$(basename $(ls ci/cp2k-tests/core.* | head -1))
+          echo "CORE=$CORE"
+          docker run --rm --cap-add SYS_RESOURCE -v "$PWD/ci/cp2k-tests:/work" "$IMG" \
+            bash -lc "apt-get update -qq > apt.log 2>&1 && apt-get install -y -qq gdb >> apt.log 2>&1 && \
+              cd /work && \
+              gdb -batch \
+                -ex 'set pagination off' \
+                -ex 'bt 30' \
+                -ex 'frame 7' -ex 'info args' -ex 'p *args' -ex 'p args' -ex 'x/32gx args' \
+                -ex 'frame 8' -ex 'info args' -ex 'p *args' 2>&1 | tee e6-gdb.txt" 2>&1 | tail -5
+          echo "=== gdb 关键输出 ==="
+          sed -n '/#0 /,/#30/p' ci/cp2k-tests/e6-gdb.txt | head -45
+
+      - name: upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e6-evidence
+          path: |
+            e6-core-pattern-before.txt
+            e6-core-pattern-after.txt
+            e6-core-ls.txt
+            ci/cp2k-tests/e6-gdb.txt
+            ci/cp2k-tests/e6.err
+          retention-days: 7
