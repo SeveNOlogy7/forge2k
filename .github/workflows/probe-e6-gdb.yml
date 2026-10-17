@@ -58,7 +58,8 @@ jobs:
                 -ex 'set pagination off' \
                 -ex 'bt 30' \
                 -ex 'frame 7' -ex 'info args' -ex 'p *args' -ex 'p args' -ex 'x/32gx args' \
-                -ex 'frame 8' -ex 'info args' -ex 'p *args' 2>&1 | tee e6-gdb.txt" 2>&1 | tail -5
+                -ex 'frame 8' -ex 'info args' -ex 'p *args' \
+                -- /usr/local/bin/cp2k /work/${CORE} 2>&1 | tee e6-gdb.txt" 2>&1 | tail -5
           echo "=== gdb 关键输出 ==="
           sed -n '/#0 /,/#30/p' ci/cp2k-tests/e6-gdb.txt | head -45
 
