@@ -1,0 +1,100 @@
+name: deepmd env-bypass matrix (TEMPORARY, wave e5)
+
+# TEMPORARY probe artifact, not part of the product surface.
+#
+# Crash locus (from core-dump diagnosis, run 39037606858):
+#   first SIGSEGV: PC=0x428 (bad function pointer) called from
+#     inner_small_matrix_thread (OpenBLAS gemm_batch_thread.c:53)
+#   <- exec_threads (blas_server_omp.c:396) <- exec_blas._omp_fn.1 (:465) <- libgomp thread
+#   i.e. CP2K reached OpenBLAS's GEMM_BATCH batch path and the batch worker
+#   called a corrupted function pointer. A second SIGSEGV inside libgcc's
+#   unwinder (libgfortran's backtrace) produced the historical 3-frame output.
+#
+# Hypothesis: the corrupted dispatch comes from the OpenBLAS batch/thread
+# machinery for this build/threading combination. This probe tries each
+# candidate bypass knob in isolation against the SAME prebuilt image
+# (ghcr, no rebuild needed - pull only):
+#   a1 OPENBLAS_NUM_THREADS=1          (single-thread OpenBLAS: skip the thread server path)
+#   a2 OMP_NUM_THREADS=1
+#   a3 OPENBLAS_NUM_THREADS=1 + OMP_NUM_THREADS=1
+#   a4 LIBXS_GEMM_BACKEND=1            (CP2K libxs backend selection - previously untried values)
+#   a5 LIBXS_GEMM_BACKEND=2
+#   a6 LIBXS_GEMM_BACKEND=0
+#   a7 OPENBLAS_NUM_THREADS=2          (multithread control)
+#   a0 baseline (control, expect rc=139)
+# Verdict per arm: rc==0 AND ENERGY line AND PROGRAM ENDED.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - probe/e5-env
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  e5:
+    name: deepmd env-bypass matrix on prebuilt ghcr image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Login ghcr + pull prebuilt deepmd image
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull ghcr.io/sevenology7/forge2k-probe:2026.2-deepmd || {
+            echo "GHCR_PULL=FAIL - falling back to local build is not possible here" >&2; exit 1; }
+          docker image inspect ghcr.io/sevenology7/forge2k-probe:2026.2-deepmd --format 'GHCR_IMAGE_SIZE={{.Size}}' | tee -a e5-verdict.txt
+
+      - name: env-bypass arms
+        run: |
+          set -o pipefail
+          IMG=ghcr.io/sevenology7/forge2k-probe:2026.2-deepmd
+          run_arm() {
+            local name="$1"; shift
+            echo "===== ARM ${name} envs: $* ====="
+            local rc=0
+            docker run --rm --shm-size=1g "$@" -v "$PWD/ci/cp2k-tests:/work" "$IMG" \
+              bash -c "cd /work && cp2k -i deepmd-water.inp -o e5-${name}.out 2> e5-${name}.err; echo rc=\$?" 2>&1 | tee "e5-${name}-console.txt" || rc=$?
+            local got; got="$(grep -m1 '^rc=' "e5-${name}-console.txt" | cut -d= -f2)"
+            local energy; energy="$(grep -hE 'ENERGY\|' "ci/cp2k-tests/e5-${name}.out" 2>/dev/null | tail -1 | tr -s ' ' | cut -d' ' -f6)"
+            local ended=no
+            grep -q "PROGRAM ENDED AT" "ci/cp2k-tests/e5-${name}.out" 2>/dev/null && ended=yes
+            if [ "${got:-NA}" = "0" ] && [ "${ended}" = "yes" ] && [ -n "${energy}" ]; then
+              echo "ARM_VERDICT:PASS ${name} rc=0 energy=${energy}" | tee -a e5-verdict.txt
+            else
+              echo "ARM_VERDICT:FAIL ${name} rc=${got:-NA} ended=${ended} energy=${energy:-NA}" | tee -a e5-verdict.txt
+            fi
+          }
+          run_arm a0
+          run_arm a1 -e OPENBLAS_NUM_THREADS=1
+          run_arm a2 -e OMP_NUM_THREADS=1
+          run_arm a3 -e OPENBLAS_NUM_THREADS=1 -e OMP_NUM_THREADS=1
+          run_arm a4 -e LIBXS_GEMM_BACKEND=1
+          run_arm a5 -e LIBXS_GEMM_BACKEND=2
+          run_arm a6 -e LIBXS_GEMM_BACKEND=0
+          run_arm a7 -e OPENBLAS_NUM_THREADS=2
+
+      - name: verdict matrix (never fails)
+        if: always()
+        run: |
+          echo "===== E5 VERDICT MATRIX ====="
+          cat e5-verdict.txt 2>/dev/null || echo "(no verdicts)"
+          n_pass="$(grep -c 'ARM_VERDICT:PASS' e5-verdict.txt 2>/dev/null || true)"
+          echo "E5_SUMMARY: ${n_pass} passing arm(s)"
+
+      - name: upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e5-evidence
+          path: |
+            e5-verdict.txt
+            e5-*-console.txt
+            ci/cp2k-tests/e5-*.out
+            ci/cp2k-tests/e5-*.err
+          retention-days: 7
