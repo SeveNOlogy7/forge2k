@@ -60,8 +60,8 @@ jobs:
             local rc=0
             docker run --rm --shm-size=1g "$@" -v "$PWD/ci/cp2k-tests:/work" "$IMG" \
               bash -c "cd /work && cp2k -i deepmd-water.inp -o e5-${name}.out 2> e5-${name}.err; echo rc=\$?" 2>&1 | tee "e5-${name}-console.txt" || rc=$?
-            local got; got="$(grep -m1 '^rc=' "e5-${name}-console.txt" | cut -d= -f2)"
-            local energy; energy="$(grep -hE 'ENERGY\|' "ci/cp2k-tests/e5-${name}.out" 2>/dev/null | tail -1 | tr -s ' ' | cut -d' ' -f6)"
+            local got; got="$(grep -m1 '^rc=' "e5-${name}-console.txt" 2>/dev/null | cut -d= -f2 || true)"
+            local energy; energy="$(grep -hE 'ENERGY\|' "ci/cp2k-tests/e5-${name}.out" 2>/dev/null | tail -1 | tr -s ' ' | cut -d' ' -f6 || true)"
             local ended=no
             grep -q "PROGRAM ENDED AT" "ci/cp2k-tests/e5-${name}.out" 2>/dev/null && ended=yes
             if [ "${got:-NA}" = "0" ] && [ "${ended}" = "yes" ] && [ -n "${energy}" ]; then
