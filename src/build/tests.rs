@@ -2678,3 +2678,129 @@ fn t_feat_dockerfile_name_and_lookup_unchanged() {
         "T-FEAT: the generated feature Dockerfile must be cleaned up"
     );
 }
+
+// --------------------------------------------------------
+// Wave deepmd-fix: build OpenBLAS without SMALL_MATRIX_OPT for
+// the deepmd preset (OpenBLAS 0.3.33 batch-path defect bypass)
+// --------------------------------------------------------
+//
+// Root cause (core + gdb + source level): OpenBLAS 0.3.33's
+// SMALL_MATRIX_OPT small-matrix batched-GEMM dispatch
+// (interface/gemm_batch.c: `BLAS_SMALL_B0_OPT`) hands a table offset
+// (observed 0x428) to its worker as a function pointer; the worker
+// (driver/level3/gemm_batch_thread.c:53) jumps to it and SIGSEGVs. The
+// upstream fix (PR #5980) is develop-only — v0.3.33 and v0.3.34 still
+// carry the raw table cast. `-DSMALL_MATRIX_OPT` gates all of the
+// offending code (interface dispatch and kernels alike) and comes from
+// Makefile.system:266-267 (`SMALL_MATRIX_OPT = 1` under x86_64) plus
+// :291-293. A GNU make command-line variable overrides that makefile
+// assignment and rides MAKEFLAGS into the recursive sub-makes, so the
+// deepmd render patches the toolchain's install_openblas.sh (appending
+// `SMALL_MATRIX_OPT=0` to both make invocations) in its own RUN between
+// the clone and the toolchain install. Feature-free renders are
+// byte-frozen and must not carry it.
+
+/// The deepmd release-cmake renders (CPU and GPU, every supported
+/// version) must carry the install_openblas.sh patch: `SMALL_MATRIX_OPT=0`
+/// on the same segment as the script path, as a `RUN sed -i`, placed
+/// after the clone (script on disk) and before the toolchain install
+/// (`install_cp2k_toolchain.sh` not yet run).
+#[test]
+fn t_fix_deepmd_render_patches_openblas_small_matrix_opt() {
+    // Positive matrix: CPU/GPU on the current release, plus the other two
+    // versions the arm supports (same release-cmake build step).
+    let arms = [
+        ("2026.2", "none"),
+        ("2026.2", "P100"),
+        ("2026.1", "none"),
+        ("2027.0", "none"),
+    ];
+    for (version, cuda) in arms {
+        let c = base_config_features(
+            "toolchain",
+            version,
+            "mpich",
+            "generic",
+            cuda,
+            "psmp",
+            &["deepmd"],
+        );
+        let content = generate_dockerfile_content(&c)
+            .unwrap_or_else(|e| panic!("T-FIX: render deepmd arm ({version}, cuda={cuda}): {e}"));
+
+        assert!(
+            !content.contains("{{"),
+            "T-FIX: no template placeholder may survive rendering (deepmd {version}, cuda={cuda}):\n{content}"
+        );
+
+        // Tolerant match (task spec): `SMALL_MATRIX_OPT=0` and
+        // `install_openblas.sh` on the same physical segment.
+        let patch_line = line_containing(&content, "install_openblas.sh", "OpenBLAS patch");
+        assert!(
+            patch_line.contains("SMALL_MATRIX_OPT=0"),
+            "T-FIX: the install_openblas.sh segment must carry the SMALL_MATRIX_OPT=0 injection ({version}, cuda={cuda}), got: {patch_line}"
+        );
+        assert!(
+            patch_line.trim_start().starts_with("RUN sed -i ")
+                && patch_line.contains("NUM_THREADS=128 "),
+            "T-FIX: the patch must be a `RUN sed -i` rewriting the script's NUM_THREADS=128 make-variable line ({version}, cuda={cuda}), got: {patch_line}"
+        );
+
+        // Ordering: clone RUN (file exists) < patch RUN < toolchain install RUN.
+        let clone_at = content
+            .find("git clone --recursive -b \"$REF\" https://github.com/cp2k/cp2k.git")
+            .expect("T-FIX: the render must carry the canon-git clone line");
+        let patch_at = content
+            .find("SMALL_MATRIX_OPT=0")
+            .expect("T-FIX: patch located above must be a substring");
+        let install_at = content
+            .find("install_cp2k_toolchain.sh")
+            .expect("T-FIX: the render must carry the toolchain install RUN");
+        assert!(
+            clone_at < patch_at && patch_at < install_at,
+            "T-FIX: the OpenBLAS patch must sit between the clone ({clone_at}) and the toolchain install ({install_at}), found at {patch_at} ({version}, cuda={cuda})"
+        );
+    }
+}
+
+/// Zero-change guard: every feature-free arm (and the whole non-deepmd
+/// surface) must stay free of the workaround — the patch is rendered by
+/// the `deepmd` preset alone.
+#[test]
+fn t_fix_openblas_patch_is_deepmd_arm_only() {
+    let arms = [
+        ("toolchain", "master", "none", "master cmake arm"),
+        ("toolchain", "2023.2", "none", "2023.2 make arm"),
+        (
+            "toolchain",
+            "2026.1",
+            "none",
+            "2026.1 release-cmake CPU arm",
+        ),
+        (
+            "toolchain",
+            "2026.2",
+            "none",
+            "2026.2 release-cmake CPU arm",
+        ),
+        (
+            "toolchain",
+            "2026.2",
+            "P100",
+            "2026.2 release-cmake GPU arm",
+        ),
+        ("spack", "2025.2", "none", "spack 2025.2 arm"),
+        ("spack", "2026.2", "none", "spack 2026.2 arm"),
+    ];
+    for (method, version, cuda, what) in arms {
+        let c = base_config_features(method, version, "mpich", "generic", cuda, "psmp", &[]);
+        let content = generate_dockerfile_content(&c)
+            .unwrap_or_else(|e| panic!("T-FIX: render feature-free arm {what}: {e}"));
+        for forbidden in ["SMALL_MATRIX_OPT", "install_openblas.sh"] {
+            assert!(
+                !content.contains(forbidden),
+                "T-FIX: the feature-free {what} render must not carry {forbidden} (zero-change guard)"
+            );
+        }
+    }
+}

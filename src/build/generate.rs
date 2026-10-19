@@ -212,6 +212,17 @@ fn generate_toolchain_dockerfile(config: &BuildConfig) -> Result<String> {
     } else {
         canon_git_clone_block(&config.version, &format!("support/v{}", config.version))
     };
+    // OpenBLAS workaround for the deepmd preset (docs on the constant):
+    // `validate_feature_arm` has already rejected non-empty features on
+    // every arm outside the toolchain release-cmake one, so the `deepmd`
+    // flag alone is the gate. A feature-free render substitutes "" into the
+    // template's own blank line, so all non-deepmd renders stay
+    // byte-identical.
+    let openblas_patch = if config.features.iter().any(|f| f == "deepmd") {
+        OPENBLAS_SMALL_MATRIX_PATCH_STEP
+    } else {
+        ""
+    };
 
     let build_step = if use_cmake {
         if config.version == "master" {
@@ -302,6 +313,7 @@ exec "$@"' > /usr/local/bin/entrypoint.sh && chmod 755 /usr/local/bin/entrypoint
             ("CUDA_EXTRA", &cuda_extra),
             ("CPU", &config.cpu),
             ("GIT_CLONE", &git_clone),
+            ("OPENBLAS_PATCH", openblas_patch),
             ("BUILD_STEP", &build_step),
             ("COPY_STEP", &copy_step),
             ("LINK_STEP", &link_step),
@@ -362,6 +374,49 @@ fn cuda_sm_code(gpu: &str) -> &'static str {
 /// output on a miss, so `test -n` carries the verdict.
 const FEATURE_CONFIG_GUARDS: &str = r#"    test -n "$(find "${TOOLCHAIN_DIR}/install" -maxdepth 6 ! -type l -name TorchConfig.cmake -print -quit)" || { echo "ERROR: TorchConfig.cmake not found under ${TOOLCHAIN_DIR}/install; the setup-exported CMAKE_PREFIX_PATH cannot resolve Torch (toolchain --install-all drift)" >&2; exit 1; } && \
     test -n "$(find "${TOOLCHAIN_DIR}/install" -maxdepth 6 ! -type l -name DeePMDConfig.cmake -print -quit)" || { echo "ERROR: DeePMDConfig.cmake not found under ${TOOLCHAIN_DIR}/install; find_package(DeePMD REQUIRED CONFIG) cannot resolve (toolchain --install-all drift)" >&2; exit 1; } && \
+"#;
+
+/// OpenBLAS workaround rendered by the `deepmd` feature preset: one RUN
+/// between the clone (which has just put the toolchain script on disk) and
+/// the toolchain install RUN (which has not run yet), rewriting the
+/// `NUM_THREADS=128` make-variable lines of the toolchain's
+/// `install_openblas.sh` to also pass `SMALL_MATRIX_OPT=0`.
+///
+/// Why (core + gdb + source level, probe run 39037606858; full write-up in
+/// `.omz/.../results/deepmd-root-cause.md`): the toolchain's pinned
+/// OpenBLAS 0.3.33 compiles the small-matrix batched-GEMM path on x86_64
+/// (`Makefile.system:266-267` plain `SMALL_MATRIX_OPT = 1`, turned into
+/// `-DSMALL_MATRIX_OPT` at `:291-293`). That path hands a table offset
+/// (observed `0x428`) to its worker as a function pointer
+/// (`interface/gemm_batch.c` `BLAS_SMALL_B0_OPT` dispatch ->
+/// `driver/level3/gemm_batch_thread.c:53`), and the first small batched GEMM
+/// of a CP2K deepmd NNP evaluation jumps to it and SIGSEGVs. The upstream
+/// fix (OpenBLAS PR #5980) is develop-only — neither v0.3.33 nor v0.3.34
+/// carries it — and every environment knob was proven inert (8 arms).
+///
+/// Mechanism: `SMALL_MATRIX_OPT=0` on the make command line is a GNU make
+/// *command-line variable*, which overrides the makefile's plain assignment
+/// and rides MAKEFLAGS into OpenBLAS's recursive sub-makes; no object is
+/// then compiled with `-DSMALL_MATRIX_OPT`, which gates the whole offending
+/// code (dispatch and kernels alike), so the build stays link-complete —
+/// the same configuration as the architectures where the variable is never
+/// set. The sed pattern carries the trailing space so the script's
+/// explanatory `# NUM_THREADS=128: ...` comment is not touched, and only
+/// the text before the line-continuation backslash changes, so the
+/// continuation is preserved verbatim. `-i` rewrites in place; the `= 2`
+/// count guard turns upstream script drift (variable renamed, call shape
+/// changed) into a loud build failure instead of a silently unpatched
+/// OpenBLAS.
+const OPENBLAS_SMALL_MATRIX_PATCH_STEP: &str = r#"# deepmd preset: build OpenBLAS with SMALL_MATRIX_OPT=0. On x86_64 this
+# variable is on by default (Makefile.system:266-267) and enables the
+# small-matrix gemm_batch dispatch that hands a table offset (0x428) to
+# driver/level3/gemm_batch_thread.c:53 as a function pointer -> SIGSEGV in
+# deepmd runs. The upstream fix (OpenBLAS PR #5980) is develop-only; neither
+# v0.3.33 nor v0.3.34 carries it (core+gdb backtrace, probe run 39037606858).
+# The make command line wins over the makefile assignment and is inherited by
+# OpenBLAS's recursive sub-makes (MAKEFLAGS), so no object gets the define.
+RUN sed -i 's/NUM_THREADS=128 /NUM_THREADS=128 SMALL_MATRIX_OPT=0 /' /opt/cp2k/tools/toolchain/scripts/stage2/install_openblas.sh && \
+    [ "$(grep -c 'NUM_THREADS=128 SMALL_MATRIX_OPT=0 ' /opt/cp2k/tools/toolchain/scripts/stage2/install_openblas.sh)" = 2 ]
 "#;
 
 /// CMake build step for releases >= 2026.1: the master CMake arm plus

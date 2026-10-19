@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/var/cache/apt,id=apt-2204,sharing=locked \
     unzip wget xxd xz-utils zlib1g-dev
 
 {{GIT_CLONE}}
-
+{{OPENBLAS_PATCH}}
 WORKDIR /opt/cp2k/tools/toolchain
 RUN --mount=type=cache,target=/opt/cp2k/tools/toolchain/build,id=toolchain-tarballs,sharing=locked \
     /bin/bash -c -o pipefail \
