@@ -1,7 +1,8 @@
 # CP2K functional test inputs for e2e-images (CPU variants)
 
 Functional tests for the CI-built CPU images (the H2O suite is a hard gate;
-the deepmd water test is informational due to a known upstream issue):
+the deepmd water test is a hard gate again after the OpenBLAS
+SMALL_MATRIX_OPT fix, see below):
 
 - **H2O suite** -- image `cp2k/cp2k:2026.2_mpich_generic_psmp` (variant
   `toolchain_2026.2_generic`). Four pinned upstream H2O inputs are run for
@@ -16,29 +17,42 @@ the deepmd water test is informational due to a known upstream issue):
   `assert_cp2k_output.sh`. This goes past the `cp2kflags` token gate: it
   proves the DeePMD/libtorch build actually computes (and that the MPI-shared
   DeePMD force path is rank-invariant).
-  **Status (2026-10-16): KNOWN UPSTREAM ISSUE -- currently failing.** The
-  computation-level run dies with rc=139 (SIGSEGV) during compute after the
-  model loads; the pin below is deliberately retained (do not delete) and the
-  CI step is informational (`continue-on-error`), see the known-upstream-issue
-  section below. Build step and cp2kflags gate pass.
+  **Status (updated 2026-10-21): FIXED AND VERIFIED -- hard gate restored.**
+  With OpenBLAS built `SMALL_MATRIX_OPT=0` (fix commit f58aeed) the
+  computation-level run passes: e2e run 39286488384 has `deepmd-water`
+  np1/np2 rc=0 and the energy -17.266752586704772 is bit-identical to the
+  upstream TEST_FILES.toml M011 reference. The pin below is retained and the
+  CI step blocks the run on failure again; the original SIGSEGV
+  investigation is kept as history in the section below. Build step and
+  cp2kflags gate pass.
 
 Wired into `.github/workflows/e2e-images.yml`: step
 `functional test: H2O suite (2026.2 CPU variant; hard gate)` gated on
 `inputs.variant == 'toolchain_2026.2_generic'`, and steps
 `smoke + cp2kflags hard gate (2026.2 deepmd variant)` (hard gate) plus
-`functional test: deepmd water (2026.2 deepmd variant; informational - known
-upstream issue)` (`continue-on-error: true`) gated on
+`functional test: deepmd water (2026.2 deepmd variant; hard gate)` gated on
 `inputs.variant == 'toolchain_2026.2_generic_deepmd'` (GPU variants are
 deliberately not covered: the runner has no NVIDIA driver).
 
-## deepmd-water: known upstream issue (status 2026-10-16)
+## deepmd-water: known upstream issue (status 2026-10-16) -- RESOLVED 2026-10-21
 
-The `deepmd-water` computation-level test currently **fails**, and its CI step
-is **informational** (`continue-on-error: true`): it no longer blocks the e2e
-run, but it still executes with the full assertion, so an upstream fix flips
-the run green automatically. The pinned reference and the byte-exact input are
-deliberately retained (do not delete) -- they are the armed regression
-detector.
+**Resolution:** the crash was root-caused (core dump + gdb + source-level
+evidence, runs 39037606858 / 39045939348) to the toolchain-built **OpenBLAS
+0.3.33 SMALL_MATRIX_OPT** small-matrix `gemm_batch` dispatch defect, not to
+deepmd-kit/libtorch (upstream fix PR #5980 is develop-only; v0.3.33/v0.3.34
+ship without it). Fix: the `deepmd` preset injects a RUN before the toolchain
+install that builds OpenBLAS with `SMALL_MATRIX_OPT=0` (commit f58aeed). The
+defect no longer reproduces: e2e run 39286488384 has `deepmd-water` np1/np2
+rc=0 and the energy -17.266752586704772 is bit-identical to the upstream
+TEST_FILES.toml M011 reference. The CI step is a hard gate again
+(`continue-on-error` removed). The paragraphs below are the historical record
+of the investigation while it was failing (kept for the evidence chain).
+
+The `deepmd-water` computation-level test used to **fail**, and its CI step
+was **informational** (`continue-on-error: true`) at the time: it did not
+block the e2e run, but it still executed with the full assertion. The pinned
+reference and the byte-exact input are retained -- they now guard the fixed
+build as a hard gate.
 
 Observed failure (identical in both e2e rounds): `mpirun -np 1` / `-np 2 cp2k
 -i deepmd-water.inp` -> rc=139 (SIGSEGV) at compute time, after the DeePMD
@@ -64,7 +78,8 @@ authorization.
 
 Decision record / full transcript: maintainer-local
 `.omz/runtime/<stem>/results/deepmd-degrade.md` (plus the refuted-fix
-record `deepmd-gomp-fix.md` in the same directory); note `.omz/` is
+record `deepmd-gomp-fix.md`, the root-cause report `deepmd-root-cause.md`
+and the fix transcript `deepmd-fix.md` in the same directory); note `.omz/` is
 gitignored and therefore not reachable from the repository — this
 README section is the in-repo index.
 

@@ -335,8 +335,8 @@ jobs:
           fi
           echo "FUNCTIONAL VERDICT:PASS"
 
-      # --- 2026.2 deepmd feature variant (wave: feature-presets; gate
-      # degraded in wave t4-degrade) -----------------------------------------
+      # --- 2026.2 deepmd feature variant (wave: feature-presets; compute
+      # gate restored in wave fix-r2 after the SMALL_MATRIX_OPT fix) -------
       # The build step above and Gate 1 (cp2kflags) below remain HARD gates:
       # both passed in two e2e rounds (runs 38682037203 / 38707255454).
       # Gate 1 (cp2kflags): proves the rendered flags reached the COMPILED
@@ -344,31 +344,22 @@ jobs:
       # (upstream src/cp2k_info.F: __DEEPMD -> token "deepmd", __LIBTORCH ->
       # token "libtorch"), so a green version probe without the tokens is a
       # real failure here.
-      # Gate 2 (computation-level) is DEGRADED TO INFORMATIONAL here: the
-      # deepmd-water run dies with rc=139 (SIGSEGV) during compute after the
-      # model loads, at the same point in both e2e rounds (np1 and np2
-      # alike), and the two-round budget is exhausted with the experiment
-      # matrix closing every local hypothesis:
-      #   E1 gdb probe -> no backtrace output;
-      #   E2 duplicated libgomp found in probe run 38695004330 -> unify fix
-      #      shipped -> round 2 (run 38707255454) reproduced a byte-identical
-      #      crash point WITH the unify link in the image -> hypothesis
-      #      refuted empirically (the fix is reverted in git, kept as an
-      #      attempt in history);
-      #   E3 single-thread/scoped env inert (rc=139 persists); CXX11 ABI
-      #      already ruled out (__cxx11 symbol count consistent).
-      # Root cause therefore points at the upstream deepmd-kit 3.1.0 +
-      # libtorch 2.7.1 cxx11-abi combination itself, which upstream never
-      # verifies in this environment (cp2k's own toolchain image builds with
-      # DEEPMD=OFF; the spack route pins deepmdkit@3.1.3) - not ABI, not
-      # thread env, not gomp.
-      # The step therefore keeps its full upstream assertion (reference
+      # Gate 2 (computation-level) is a HARD gate again. It had been degraded
+      # to informational (wave t4-degrade) while deepmd-water died with
+      # rc=139 (SIGSEGV) at compute time in two e2e rounds (runs
+      # 38682037203 / 38707255454). Root cause (core + gdb + source-level
+      # evidence, runs 39037606858 / 39045939348): the OpenBLAS 0.3.33
+      # SMALL_MATRIX_OPT small-matrix gemm_batch dispatch defect - not
+      # deepmd-kit/libtorch, not ABI, not thread env, not gomp. Fix
+      # (commit f58aeed): the `deepmd` preset injects a RUN before the
+      # toolchain install that builds OpenBLAS with SMALL_MATRIX_OPT=0.
+      # Verified in e2e run 39286488384: deepmd-water np1/np2 rc=0, energy
+      # -17.266752586704772 bit-identical to the upstream TEST_FILES.toml
+      # M011 reference - so the step is restored to blocking semantics.
+      # The step keeps its full upstream assertion (reference
       # -17.266752586704772 +- 1e-6, TEST_FILES.toml matcher M011; PINNED
-      # table in ci/cp2k-tests/assert_cp2k_output.sh) and keeps running on
-      # every deepmd e2e, but with continue-on-error so a failure no longer
-      # blocks the run: it turns the run green automatically once upstream
-      # ships a working combination (armed regression detector), while the
-      # step's own red/green annotation carries the signal meanwhile.
+      # table in ci/cp2k-tests/assert_cp2k_output.sh) and runs on every
+      # deepmd e2e; a failure now blocks the run.
       # The DeePMD model (water_dpa2.pth) ships inside the image at
       # /opt/cp2k/data/DeePMD/ and resolves through the compiled-in
       # -DCP2K_DATA_DIR=/opt/cp2k/data, so no extra mount is needed; -np 1
@@ -386,22 +377,16 @@ jobs:
           grep -Eq 'cp2kflags:.*(^| )libtorch( |$)' cp2k-version.txt
           echo "=== smoke end: deepmd + libtorch tokens present (hard gate) ==="
 
-      - name: "functional test: deepmd water (2026.2 deepmd variant; informational - known upstream issue)"
-        # Degraded from a hard gate in wave t4-degrade (budget exhausted, E2
-        # gomp hypothesis refuted by round 2): the upstream combination is
-        # broken in an environment upstream does not verify; see the block
-        # comment above. continue-on-error keeps the run green on failure
-        # while the step itself still executes and asserts, so an upstream
-        # fix flips the annotation back to green (armed detector). The
-        # fail=1 / exit 1 path is kept on purpose: the step must still
-        # report FAIL, it just no longer blocks the job.
-        continue-on-error: true
+      - name: "functional test: deepmd water (2026.2 deepmd variant; hard gate)"
+        # Restored from informational (wave t4-degrade) to a hard gate after
+        # the OpenBLAS SMALL_MATRIX_OPT=0 fix (commit f58aeed, verified in
+        # e2e run 39286488384): a failure now blocks the job.
         if: inputs.variant == 'toolchain_2026.2_generic_deepmd'
         env:
           IMAGE: cp2k/cp2k:2026.2_mpich_generic_psmp_deepmd
         run: |
           set -u
-          echo "KNOWN-UPSTREAM-ISSUE: deepmd-kit 3.1.0 + libtorch 2.7.1 cxx11-abi SIGSEGVs at compute time in an environment upstream does not verify (evidence runs 38682037203 / 38707255454; not ABI / not thread env / not gomp) - see ci/cp2k-tests/README (deepmd-water known upstream issue)."
+          # OpenBLAS is built with SMALL_MATRIX_OPT=0 by the deepmd preset, so the 0.3.33 batch defect no longer reproduces (verified run 39286488384: np1/np2 rc=0, energy bit-identical to the upstream reference).
           fail=0
           for np in 1 2; do
             label="deepmd-water-np${np}"
