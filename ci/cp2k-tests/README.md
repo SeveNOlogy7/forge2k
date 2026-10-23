@@ -48,6 +48,24 @@ TEST_FILES.toml M011 reference. The CI step is a hard gate again
 (`continue-on-error` removed). The paragraphs below are the historical record
 of the investigation while it was failing (kept for the evidence chain).
 
+**Preserved key evidence** (originally captured in probe run 39037606858 logs;
+pinned here so the chain survives CI log retention limits):
+
+```
+gdb (core.636, OpenBLAS 0.3.33 SMALL_MATRIX_OPT build):
+#6  0x0000000000000428 in ?? ()                <- faulting PC: corrupted fn ptr
+#7  0x000014a928758287 in inner_small_matrix_thread (...) at gemm_batch_thread.c:53
+        /* driver/level3/gemm_batch_thread.c: gemm_small_kernel_b0 = args->routine;
+           gemm_small_kernel_b0(...) — args->routine carried the raw offset 0x428 */
+#8  0x000056258e168966 in exec_threads (...) at blas_server_omp.c:396
+        /* int (*routine)(...) = queue->routine; routine(queue->args, ...) */
+#9  exec_blas._omp_fn.1 () at blas_server_omp.c:465
+#10 libgomp.so.1 -> pthread entry
+final fatal RIP (core): libgcc_s.so.1+0x1583e _Unwind_GetTextRelBase
+        (secondary SIGSEGV inside libgfortran's backtrace unwinder)
+NT_FILE attribution: frame #7 -> libopenblasp-r0.3.33.so base+0x190287
+```
+
 The `deepmd-water` computation-level test used to **fail**, and its CI step
 was **informational** (`continue-on-error: true`) at the time: it did not
 block the e2e run, but it still executed with the full assertion. The pinned
