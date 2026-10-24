@@ -387,6 +387,17 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Restart the Docker engine (CLI `forge2k mirror --restart`).
+///
+/// Long-blocking by design: on Windows this force-quits Docker Desktop,
+/// relaunches it and polls up to 60s for the engine to answer; on other
+/// platforms it shells out to `sudo systemctl restart docker` (falling back
+/// to rootless `systemctl --user restart docker`). Consequences for
+/// callers:
+/// - never call this on a UI thread — the GUI runs it on a worker thread;
+/// - a GUI process has no tty, so the `sudo` password prompt can never be
+///   answered — non-Windows GUIs must show this as a manual command instead
+///   of executing it.
 pub fn restart_docker() -> Result<()> {
     #[cfg(target_os = "windows")]
     {

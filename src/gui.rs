@@ -111,6 +111,15 @@ pub struct Forge2kApp {
     buildkit_probe: Arc<Mutex<ProbeState<build::BuildKitStatus>>>,
     storage_probe: Arc<Mutex<ProbeState<build::DockerStorageStatus>>>,
 
+    /// "Restart Docker" worker state (CLI `mirror --restart` parity). The
+    /// Windows arm of `build::restart_docker` sleeps and polls for up to a
+    /// minute, so it runs on a worker thread through `run_probe`. Windows
+    /// only: elsewhere it shells out to `sudo systemctl`, which a GUI
+    /// process cannot run (no tty for the password prompt) — there the
+    /// Settings tab only shows the manual command and needs no state.
+    #[cfg(windows)]
+    restart_probe: Arc<Mutex<ProbeState<Result<(), String>>>>,
+
     // Version list cache: one disk scan at startup or via the explicit
     // Refresh button — the frame loop never rescans dockerfiles/.
     configs_cache: Vec<build::ConfigInfo>,
@@ -163,6 +172,8 @@ impl Default for Forge2kApp {
             current_mirror,
             buildkit_probe: Arc::new(Mutex::new(ProbeState::default())),
             storage_probe: Arc::new(Mutex::new(ProbeState::default())),
+            #[cfg(windows)]
+            restart_probe: Arc::new(Mutex::new(ProbeState::default())),
             configs_cache: build::list_available_configs(),
             mirror_input: settings.mirror_input,
             settings_message: String::new(),
@@ -517,7 +528,9 @@ impl Forge2kApp {
 impl eframe::App for Forge2kApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Keep repainting during build and while System-tab probes run on
-        // their worker threads (buildx/PowerShell/df can take seconds).
+        // their worker threads (buildx/PowerShell/df can take seconds), and
+        // while the Settings tab's Docker restart runs on its worker thread
+        // (the Windows restart polls for up to 60s).
         let probes_running = {
             let buildkit = self
                 .buildkit_probe
@@ -527,7 +540,15 @@ impl eframe::App for Forge2kApp {
                 .storage_probe
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            buildkit.running || storage.running
+            #[cfg(windows)]
+            let restarting = self
+                .restart_probe
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .running;
+            #[cfg(not(windows))]
+            let restarting = false;
+            buildkit.running || storage.running || restarting
         };
         if *self
             .is_building
@@ -1714,6 +1735,119 @@ impl Forge2kApp {
                         }
                     }
                 });
+
+                // ─── Restart Docker (CLI `mirror --restart` parity) ───
+                // Applying or removing a mirror only takes effect once the
+                // daemon restarts; this is the in-GUI equivalent.
+                #[cfg(windows)]
+                {
+                    ui.add_space(8.0);
+                    // Snapshot under a short lock; the worker thread keeps
+                    // writing the original behind the mutex.
+                    let snap = self
+                        .restart_probe
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .clone();
+                    ui.horizontal(|ui| {
+                        // A restart tears down Docker Desktop, which would kill
+                        // an in-flight build — keep the button disabled while
+                        // the Build tab is busy (CANCEL BUILD is the way out).
+                        let building = *self
+                            .is_building
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        let btn_label = if snap.running {
+                            "⏳ Restarting…"
+                        } else if building {
+                            "🐳 Restart Docker (build in progress)"
+                        } else {
+                            "🐳 Restart Docker"
+                        };
+                        if ui
+                            .add_enabled(!snap.running && !building, egui::Button::new(btn_label))
+                            .clicked()
+                        {
+                            // Worker thread, not the UI thread:
+                            // restart_docker sleeps 3s and then polls for up
+                            // to 60s until the engine answers — a synchronous
+                            // call would freeze the whole window for that
+                            // long. `run_probe` also absorbs double-clicks
+                            // while a restart is in flight.
+                            self.run_probe(&self.restart_probe, || {
+                                build::restart_docker().map_err(|e| format!("{:#}", e))
+                            });
+                        }
+                        if snap.running {
+                            ui.label(
+                                RichText::new(
+                                    "Restarting Docker Desktop — the engine can take up to a minute to come back.",
+                                )
+                                .size(12.0)
+                                .color(Color32::from_rgb(255, 200, 80))
+                                .strong(),
+                            );
+                        }
+                    });
+                    match &snap.result {
+                        Some(Ok(())) => {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(
+                                    "✅ Docker restarted. Use \"Check Docker\" on the System tab to confirm the engine is back up.",
+                                )
+                                .size(12.0)
+                                .color(Color32::from_rgb(100, 220, 120)),
+                            );
+                        }
+                        Some(Err(e)) => {
+                            ui.add_space(4.0);
+                            ui.label(
+                                RichText::new(format!(
+                                    "❌ Restart failed: {e}\n   \
+                                     Start Docker Desktop manually, then use \
+                                     \"Check Docker\" on the System tab."
+                                ))
+                                .size(12.0)
+                                .color(Color32::from_rgb(255, 100, 100)),
+                            );
+                        }
+                        None => {}
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    // The non-Windows arm of restart_docker shells out to
+                    // `sudo systemctl restart docker` (falling back to
+                    // rootless `systemctl --user restart docker`). A GUI
+                    // process has no tty, so sudo could never read the
+                    // password — show the manual command instead of failing.
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(
+                            "To apply the mirror change, restart the Docker daemon manually:",
+                        )
+                        .size(12.0),
+                    );
+                    ui.label(
+                        RichText::new("  sudo systemctl restart docker")
+                            .size(12.0)
+                            .family(egui::FontFamily::Monospace),
+                    );
+                    ui.label(
+                        RichText::new("  (rootless Docker: systemctl --user restart docker)")
+                            .size(11.0)
+                            .family(egui::FontFamily::Monospace)
+                            .color(Color32::from_rgb(150, 150, 170)),
+                    );
+                    ui.label(
+                        RichText::new(
+                            "The GUI cannot run this for you: it has no terminal for the sudo password prompt.",
+                        )
+                        .size(11.0)
+                        .color(Color32::from_rgb(255, 200, 80)),
+                    );
+                }
 
                 if !self.settings_message.is_empty() {
                     ui.add_space(8.0);
