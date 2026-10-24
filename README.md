@@ -53,9 +53,16 @@ forge2k list
 -f,  --dockerfile <PATH>  指定自定义 Dockerfile（覆盖自动选择）
      --shm-size <SIZE>    Docker 构建共享内存 [默认: 1g]
      --force              跳过 Docker 引擎检查
+     --generate-only      仅解析/合成 Dockerfile 并打印路径：跳过 Docker 引擎检查
+                          与构建确认提示，退出码 0，不执行构建
 ```
 
-构建过程中按 `q` 或回车可取消（GUI 的 CANCEL 按钮等价）。取消会终止 docker 进程并返回非零退出码；构建失败同样以非零退出码结束，只有成功才打印完成提示。
+### 退出码与取消
+
+- 构建过程中输入 `q` / `quit` 或直接按回车即可取消（大小写不敏感；GUI 的 CANCEL BUILD 按钮等价），取消会终止正在运行的 docker 进程。
+- 退出码语义：构建成功 `0`；构建失败（含构建进程异常退出）`1`；构建被取消 `130`。
+- 两类"温和退出"仍以 `0` 结束：确认提示处回答否（Docker 未运行时的 `Continue anyway?` 与构建前的 `Start build?`），以及 Docker 未安装时。
+- `--version` 与 `--cpu` 是自由字符串：clap 只对 `method` / `mpi` / `cuda` / `variant` / `features` 做取值白名单，版本与 CPU 目标不校验——先匹配捆绑 Dockerfile，未命中则按模板现场合成，拼错的取值要到 Dockerfile 合成或源码 clone 阶段才失败。GUI 的版本/CPU 下拉刻意收窄为已知配置（与 `forge2k list` 所列一致），从源头避免这类拼写错误。
 
 ### 镜像 tag 命名
 
@@ -80,13 +87,46 @@ forge2k build -m toolchain -v 2026.2 --features deepmd
 - **验证状态（deepmd preset）**：镜像**构建**与 **cp2kflags 硬门**（`deepmd` + `libtorch` token）已在 e2e CI 两轮通过（runs 38682037203 / 38707255454）；计算级 `deepmd-water` 的 SIGSEGV 已定位根因并修复——**OpenBLAS 0.3.33 的 SMALL_MATRIX_OPT 批处理路径缺陷**（small-matrix `gemm_batch` 调度把表偏移 `0x428` 当函数指针传给 `driver/level3/gemm_batch_thread.c:53`；上游修复 PR #5980 只在 develop，v0.3.33/v0.3.34 未含；core + gdb + 源码级证据，runs 39037606858 / 39045939348）。修复方式：`deepmd` preset 渲染时在工具链安装前注入一个 RUN，把工具链 `install_openblas.sh` 两处 make 调用改为 `SMALL_MATRIX_OPT=0`（make 命令行变量覆盖 Makefile.system 的默认 1，并经 MAKEFLAGS 传入递归子 make），镜像因此以关闭该优化的 OpenBLAS 构建，规避缺陷；根因报告与修复转录见 `.omz/runtime/<session>/results/deepmd-root-cause.md` 与 `deepmd-fix.md`（本地运行时目录，不随仓库分发；仓库内索引见 `ci/cp2k-tests/README.md`）。**计算级测试已恢复为硬门并验证通过**：e2e run 39286488384 中 `deepmd-water` np1/np2 均 rc=0，能量 `-17.266752586704772` 与上游 `TEST_FILES.toml` M011 参考值逐位一致（根因与修复说明见 CHANGELOG 同条）。
 - **零变化保证**：OpenBLAS 补丁只出现在 `deepmd` preset 渲染中；不带 `--features` 的所有臂（toolchain master / 2023.2 / 2026.1 / 2026.2 CPU+GPU / spack）渲染逐字节不变（`dockerfiles/` 下捆绑文件也未被触碰）。
 
+### mirror 子命令
+
+配置 Docker daemon 的 registry 镜像源（拉取镜像慢或被网络阻断时使用）：
+
+```bash
+forge2k mirror                                       # 省略 url：自动探测最佳镜像
+forge2k mirror https://docker.mirrors.ustc.edu.cn    # 手动指定镜像 URL（必须 http(s):// 开头）
+forge2k mirror -r                                    # 移除镜像源配置
+forge2k mirror -r --restart                          # 移除配置并重启 Docker（两个动作都执行）
+forge2k mirror https://docker.mirrors.ustc.edu.cn --restart   # 写入配置并重启 Docker
+```
+
+- **url（位置参数，可省略）**：省略时按内置已知镜像列表（`src/mirrors.rs`：USTC、腾讯云、DaoCloud、Docker CN、Timeweb 共 5 个）逐个探测 `/v2/_catalog`（5 秒超时，HTTP 200 或 401 视为可用），取第一个可用者；全部不可用时打印已知镜像示例并提示手动提供 URL。手动指定的 URL 必须以 `http://` 或 `https://` 开头，否则拒绝写入。
+- **写入行为**：镜像源写入 daemon.json（Windows 为 `%USERPROFILE%\.docker\daemon.json`，Linux/macOS 为 `/etc/docker/daemon.json`）的 `registry-mirrors` 键。**该键被整体覆盖为单元素数组**（`[本次写入的 URL]`），daemon.json 中其余键原样保留；需要配置多个镜像须手动编辑。写入后需重启 Docker 才生效。
+- **`-r` / `--remove`**：从 daemon.json 删除 `registry-mirrors` 键（其余键保留）；配置本就不存在时静默成功。
+- **`--restart`**：重启 Docker 使配置生效——Windows 上强制结束 Docker Desktop 后重新拉起并轮询等待引擎就绪（最长 60 秒）；Linux 上执行 `sudo systemctl restart docker`（失败回退 rootless 的 `systemctl --user restart docker`）。
+- **组合语义**：`-r` 与 `--restart` 可同时使用，两个动作都执行（先移除配置、再重启），`--restart` 不会因 `-r` 被忽略；不带 `--restart` 时打印对应平台的手动重启指引（Windows：从系统托盘重启 Docker Desktop；Linux：`sudo systemctl restart docker`）。
+
+### check 子命令
+
+系统诊断，逐项打印检测结果（GUI 的 System 标签页与之同源）：
+
+| 检测项 | 内容 |
+|---|---|
+| Docker Engine | `docker version` 探测安装/运行状态与版本；未安装时打印分平台安装指引 |
+| Docker BuildKit | `docker buildx version` 探测 buildx 插件；未检出时提示构建回退 legacy builder（信息级，非错误） |
+| Docker Registry | 实际执行 `docker pull alpine:latest` 实测拉取连通性：10 秒内为 Good，超时为 Slow（显示耗时），超时/连接拒绝/无路由判为 Blocked（建议 `forge2k mirror` 自动探测） |
+| 当前 mirror | 读取 daemon.json `registry-mirrors` 的首个条目并显示（未配置则不显示该行） |
+| Docker Storage | `docker info` 取 Docker 存储根目录，并检测所在卷剩余空间——Windows 用 PowerShell `Get-CimInstance Win32_LogicalDisk`（wmic 已在 Windows 11 24H2+ 移除，不再使用），Unix 用 `df -h` |
+
+最后输出 Summary：Docker 就绪则提示可以开始构建，否则提示先解决上述问题。
+
 ## GUI
 
-`forge2k gui` 或直接运行，四个标签页：
+`forge2k gui` 或直接运行，五个标签页（Build / Configs / System / Settings / About）：
 
-- **Build**——选择方法/版本/MPI/CPU/CUDA/变体，启动、取消构建，实时滚动日志；构建结果以状态条显示（绿=成功 / 红=失败 / 黄=已取消）；CUDA 选项按所选方法联动过滤（spack 仅 none，toolchain 可选 P100/V100）
-- **System**——Docker 引擎与系统信息
-- **Settings**——registry 镜像源管理（与 `mirror` 子命令同源）；**设置会持久化**到 `~/.forge2k/settings.json`，重启后保留
+- **Build**——选择方法/版本/MPI/CPU/CUDA/变体，启动、取消构建，实时滚动日志；构建结果以状态条显示（绿=成功 / 红=失败 / 黄=已取消）；CUDA 选项按所选方法联动过滤（spack 仅 none，toolchain 可选 P100/V100）。**高级选项区**与 CLI 对齐：`--features` 预设勾选（不支持的构建臂自动置灰并显示原因）、`--no-cache`、自定义 Dockerfile 路径（与 features 互斥，路径存在性即时校验）、`--force` 跳过 Docker 检查。**Generate Only** 按钮等价 CLI `--generate-only`：解析/合成 Dockerfile 并弹出浮动预览窗展示路径与内容，不触发构建。版本/CPU 下拉刻意收窄为已知配置（与 `forge2k list` 一致），避免拼错自由字符串
+- **Configs**——预置配置全量浏览（CLI `list` 的 GUI 等价）：列出全部捆绑与 synthesized 配置及其规格（MPI/CPU/CUDA/变体、基础镜像），带 method/version 过滤下拉（对应 `list --method` / `list --version`），每条配置附等效 `forge2k build` 命令一键复制
+- **System**——系统诊断，与 CLI `check` 同源：Docker Engine / BuildKit（buildx）/ Registry 连通性（含当前 mirror 显示）/ Docker Storage（存储根目录 + 磁盘剩余空间，Windows 走 PowerShell CIM 探测）各一张卡片，按需手动探测
+- **Settings**——registry 镜像源管理（与 `mirror` 子命令同源：手动设置 / 自动探测最佳镜像 / 移除），外加 **Restart Docker** 按钮（Windows 上在后台线程执行重启并轮询状态，不冻结界面；非 Windows 不直接执行，显示等价的手动命令指引）；**设置会持久化**到 `~/.forge2k/settings.json`，重启后保留
 - **About**——项目信息与已知限制
 
 ## 构建方法
@@ -145,7 +185,7 @@ forge2k build -m toolchain -v 2026.2 --features deepmd
 ```
 src/
 ├── main.rs          # clap CLI（build/list/gui/check/mirror）+ stdin 取消
-├── gui.rs           # egui 四标签界面
+├── gui.rs           # egui 五标签界面（Build/Configs/System/Settings/About）
 ├── settings.rs      # 设置持久化（serde + ~/.forge2k/settings.json）
 ├── mirrors.rs       # registry 镜像源单一来源
 ├── templates/       # 合成 Dockerfile 模板（include_str!）
@@ -155,7 +195,7 @@ src/
     ├── registry.rs  # registry 检测与镜像源配置
     ├── catalog.rs   # 捆绑 Dockerfile 目录扫描与配置列表
     ├── generate.rs  # 合成 Dockerfile 生成
-    ├── docker.rs    # Docker 引擎探测与重启
+    ├── docker.rs    # Docker 引擎探测/重启 + BuildKit 与磁盘诊断探针（CLI check 与 GUI System 共用）
     └── tests.rs     # 测试套件
 ```
 
