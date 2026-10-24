@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, PoisonError};
                    Supports Spack-based (v2025.2+), Toolchain-based (v2023.2+), and\n\
                    master branch builds. Auto-detects Docker engine, configures registry\n\
                    mirrors, and more.\n\n\
-                   GitHub: github.com/cp2k/cp2k-containers",
+                   GitHub: github.com/SeveNOlogy7/forge2k",
     styles = clap::builder::Styles::styled()
         .header(clap::builder::styling::AnsiColor::Yellow.on_default())
         .usage(clap::builder::styling::AnsiColor::Green.on_default())
@@ -585,7 +585,7 @@ fn cmd_check() -> Result<()> {
         build::NetworkStatus::Blocked(reason) => {
             println!("  {} Registry access appears blocked", "✗".red());
             println!("    Reason: {}", reason.dimmed());
-            println!("    Suggested action: forge2k mirror --detect");
+            println!("    Suggested action: forge2k mirror (auto-detect)");
         }
         build::NetworkStatus::Unknown(reason) => {
             println!(
@@ -678,56 +678,56 @@ fn cmd_mirror(url: Option<String>, remove: bool, restart: bool) -> Result<()> {
         println!("{} Removing registry mirror configuration...", "🗑".yellow());
         build::remove_registry_mirror()?;
         println!("{} Mirror configuration removed.", "✓".green());
-        println!("  Restart Docker to apply changes.\n");
-        return Ok(());
-    }
-
-    // Use provided URL or auto-detect
-    let mirror_url = if let Some(url) = url {
-        url
     } else {
-        print!("{} Detecting best registry mirror... ", "🔍".bold());
-        std::io::Write::flush(&mut std::io::stdout())?;
-        match build::detect_best_mirror() {
-            Some(url) => {
-                println!("found: {}", url.cyan());
-                url
+        // Use provided URL or auto-detect
+        let mirror_url = if let Some(url) = url {
+            url
+        } else {
+            print!("{} Detecting best registry mirror... ", "🔍".bold());
+            std::io::Write::flush(&mut std::io::stdout())?;
+            match build::detect_best_mirror() {
+                Some(url) => {
+                    println!("found: {}", url.cyan());
+                    url
+                }
+                None => {
+                    println!("{} no working mirror found.", "✗".red());
+                    println!("  Please provide a mirror URL manually.");
+                    println!("  Example: forge2k mirror https://docker.mirrors.ustc.edu.cn\n");
+                    println!("{} Known mirrors:", "ℹ".yellow());
+                    println!("  • https://docker.mirrors.ustc.edu.cn");
+                    println!("  • https://mirror.ccs.tencentyun.com");
+                    println!("  • https://2a59f68c.m.daocloud.io");
+                    println!("  • https://registry.docker-cn.com");
+                    return Ok(());
+                }
             }
-            None => {
-                println!("{} no working mirror found.", "✗".red());
-                println!("  Please provide a mirror URL manually.");
-                println!("  Example: forge2k mirror https://docker.mirrors.ustc.edu.cn\n");
-                println!("{} Known mirrors:", "ℹ".yellow());
-                println!("  • https://docker.mirrors.ustc.edu.cn");
-                println!("  • https://mirror.ccs.tencentyun.com");
-                println!("  • https://2a59f68c.m.daocloud.io");
-                println!("  • https://registry.docker-cn.com");
-                return Ok(());
-            }
-        }
-    };
+        };
 
-    // Validate URL format
-    if !mirror_url.starts_with("http://") && !mirror_url.starts_with("https://") {
+        // Validate URL format
+        if !mirror_url.starts_with("http://") && !mirror_url.starts_with("https://") {
+            println!(
+                "{} Invalid mirror URL. Must start with http:// or https://",
+                "✗".red()
+            );
+            return Ok(());
+        }
+
         println!(
-            "{} Invalid mirror URL. Must start with http:// or https://",
-            "✗".red()
+            "{} Configuring registry mirror: {}",
+            "📝".bold(),
+            mirror_url.cyan()
         );
-        return Ok(());
+        build::set_registry_mirror(&mirror_url)?;
+        println!(
+            "{} Configuration saved to: {}",
+            "✓".green(),
+            build::daemon_config_path().to_string_lossy().cyan()
+        );
     }
 
-    println!(
-        "{} Configuring registry mirror: {}",
-        "📝".bold(),
-        mirror_url.cyan()
-    );
-    build::set_registry_mirror(&mirror_url)?;
-    println!(
-        "{} Configuration saved to: {}",
-        "✓".green(),
-        build::daemon_config_path().to_string_lossy().cyan()
-    );
-
+    // Shared tail: applies to both setting and removing the mirror. Honors
+    // --restart instead of silently ignoring the combination `mirror -r --restart`.
     if restart {
         println!("{} Restarting Docker...", "🔄".bold());
         restart_docker()?;
