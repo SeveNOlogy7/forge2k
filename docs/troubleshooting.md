@@ -98,7 +98,7 @@
 
 **解决**：**升级/使用当前版本的 deepmd preset 即可**——渲染时会在工具链安装前注入一个 RUN，把 `install_openblas.sh` 的两处 make 调用改为 `SMALL_MATRIX_OPT=0`（make 命令行变量覆盖 makefile 默认值，并经 MAKEFLAGS 传入递归子 make），镜像以关闭该优化的 OpenBLAS 构建。该修复已经过计算级验证：e2e run 39286488384 中 `deepmd-water` np1/np2 均 rc=0，能量与上游参考值逐位一致。不带 `--features` 的所有臂渲染逐字节不变（无此补丁）。
 
-## spack 方法为什么不能构建 2026.2
+## spack 方法为什么不能构建 2026.2 { #spack-2026-2 }
 
 **症状**：`forge2k build -m spack -v 2026.2 ...`（或 `--generate-only` 后的 `docker build`）失败；版本下拉里 spack 看不到 2026.2。
 
@@ -108,5 +108,5 @@
 
 ## 其他
 
-- **退出码 130 / 取消行为**：见 [FAQ](faq.md#退出码-130-是什么)。
+- **退出码 130 / 取消行为**：见 [FAQ](faq.md#exit-code-130)。
 - GUI 控件与 CLI 选项的逐项对应：见[覆盖率矩阵](coverage.md)。

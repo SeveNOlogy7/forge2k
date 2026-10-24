@@ -31,7 +31,7 @@ Forge2K 的图形界面与 CLI 完全对齐（对应关系逐项见[覆盖率矩
 | Custom Image Tag | 文本输入，留空自动生成（`cp2k/cp2k:{version}_{mpi}_{cpu}[_cuda_{GPU}]_{variant}`，master 用日期戳） | `-t/--tag` |
 
 !!! note "版本与 CPU 为何是下拉而非自由输入"
-    CLI 的 `-v/--version` 与 `--cpu` 是自由字符串（拼错要到 Dockerfile 合成或源码 clone 阶段才失败）；GUI 刻意收窄为已知配置（与 `forge2k list` 所列一致），从源头避免拼写错误。这是刻意行为，详见[覆盖率矩阵](../coverage.md#覆盖率矩阵)第 2/4 行。
+    CLI 的 `-v/--version` 与 `--cpu` 是自由字符串（拼错要到 Dockerfile 合成或源码 clone 阶段才失败）；GUI 刻意收窄为已知配置（与 `forge2k list` 所列一致），从源头避免拼写错误。这是刻意行为，详见[覆盖率矩阵](../coverage.md)第 2/4 行。
 
 **native 版本表**：GUI 的 native 版本下拉为 master / 2026.1 / 2025.2 / 2024.3，**刻意不含 2026.2**（上游 v2026.1 起删除根 Makefile，native release 臂仍走 make，选 2026.2 必败）。选中 native 时界面直接显示 "2026.2 has no verified native build matrix yet" 说明行。
 
@@ -46,7 +46,7 @@ Forge2K 的图形界面与 CLI 完全对齐（对应关系逐项见[覆盖率矩
 | No cache (--no-cache) | 勾选后 `docker build` 带 `--no-cache` | `--no-cache` |
 | Force build even if Docker is not running (--force) | 勾选后 START BUILD 跳过 Docker 运行预检（Docker 真不可用时构建本身仍可能失败） | `--force` |
 
-高级选项（no-cache / force / features / dockerfile）与 Settings 页的镜像源草稿一起持久化到 `~/.forge2k/settings.json`，重启后保留——持久化细节见下文 [Settings 持久化](#settings-持久化)。
+高级选项（no-cache / force / features / dockerfile）与 Settings 页的镜像源草稿一起持久化到 `~/.forge2k/settings.json`，重启后保留——持久化细节见下文 [Settings 持久化](#settings-persistence)。
 
 ### 联动规则表
 
@@ -117,7 +117,7 @@ registry 镜像源管理，与 CLI `mirror` 子命令同源：
 - **Windows**：按钮直接可用。点击后在**后台线程**执行——强制结束 Docker Desktop、等待 3 秒、重新拉起并轮询引擎就绪（最长 60 秒），期间按钮显示 "⏳ Restarting…"；构建进行中按钮禁用（重启会杀掉进行中的构建）。完成后提示去 System 页用 Check Docker 确认引擎恢复。
 - **Linux / macOS**：**不直接执行**。GUI 进程没有终端，`sudo systemctl` 的密码提示无法应答，因此界面只显示等价的手动命令（`sudo systemctl restart docker`，rootless 为 `systemctl --user restart docker`）及原因说明。
 
-## Settings 持久化
+## Settings 持久化 { #settings-persistence }
 
 所有跨重启保留的 GUI 输入存在 `<home>/.forge2k/settings.json`（home 取 `USERPROFILE`，回退 `HOME`）：
 

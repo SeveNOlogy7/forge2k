@@ -1,0 +1,80 @@
+site_name: Forge2K
+site_description: 一键构建 CP2K Docker 镜像的 GUI + CLI 工具
+site_url: https://sevenology7.github.io/forge2k/
+repo_url: https://github.com/SeveNOlogy7/forge2k
+repo_name: SeveNOlogy7/forge2k
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: zh
+  palette:
+    # Forge2K's own GUI is dark-first; match that identity.
+    - scheme: slate
+      primary: deep orange
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: 切换到浅色模式
+    - scheme: default
+      primary: deep orange
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: 切换到深色模式
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - search.highlight
+    - search.share
+
+# material's default lunr tokenizer only splits on ASCII word boundaries, so
+# contiguous CJK text becomes one unsearchable blob. The separator below
+# splits runs of CJK ideographs into single characters, which is the
+# standard workaround for Chinese search until lunr-languages ships a zh
+# tokenizer.
+plugins:
+  - search:
+      separator: '[\s\u200b\u3000\-\.::-]+|(?=[\u4e00-\u9fff])|(?<=[\u4e00-\u9fff])'
+      lang:
+        - en
+        - ja
+  - offline
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  # Let docs declare explicit ASCII anchors (## Heading { #anchor }) — the
+  # auto slugify options available here all drop CJK, which would turn
+  # Chinese headings into anonymous `_1`, `_2` ids.
+  - attr_list
+  - toc:
+      permalink: true
+
+nav:
+  - 首页: index.md
+  - 快速开始: quick-start.md
+  - 安装: install.md
+  - CLI 参考:
+      - forge2k build: cli/build.md
+      - forge2k list: cli/list.md
+      - forge2k check: cli/check.md
+      - forge2k mirror: cli/mirror.md
+      - forge2k gui: cli/gui.md
+  - 构建方法:
+      - Spack: methods/spack.md
+      - Toolchain: methods/toolchain.md
+      - Native: methods/native.md
+  - GUI 指南:
+      - gui/overview.md
+  - 故障排查: troubleshooting.md
+  - FAQ: faq.md
+  - 开发: development.md
+  - 覆盖率矩阵: coverage.md

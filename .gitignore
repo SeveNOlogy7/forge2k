@@ -1,6 +1,9 @@
 # Rust build artifacts
 target/
 
+# mkdocs site build output
+site/
+
 # IDE
 .idea/
 .vscode/

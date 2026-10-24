@@ -22,7 +22,7 @@
 
 通过 forge2k 只能配 **1 个**：`mirror` 子命令与 GUI Apply 会把 daemon.json 的 `registry-mirrors` 键整体覆盖为单元素数组（`[本次写入的 URL]`），文件中其余键保留。需要多个镜像源请手动编辑 daemon.json；`check` 也只显示该数组的第一个条目。
 
-## 退出码 130 是什么？
+## 退出码 130 是什么？ { #exit-code-130 }
 
 **构建被取消**。退出码语义：成功 `0`、构建失败（含构建进程异常退出）`1`、取消 `130`。取消方式：构建中输入 `q` / `quit` 或直接回车（大小写不敏感），GUI 等价操作是 CANCEL BUILD 按钮。两类"温和退出"仍是 `0`：确认提示处回答否（`Continue anyway?` / `Start build?`），以及 Docker 未安装时。
 
@@ -32,7 +32,7 @@
 
 ## spack + 2026.2 为什么构建失败？
 
-上游 support/v2026.2 重排了 `tools/spack` 目录，现有 spack 模板引用失效，因此配置目录不再广告 spack 2026.2。2026.2 请用 toolchain 方法。详见[故障排查](troubleshooting.md#spack-方法为什么不能构建-2026-2)。
+上游 support/v2026.2 重排了 `tools/spack` 目录，现有 spack 模板引用失效，因此配置目录不再广告 spack 2026.2。2026.2 请用 toolchain 方法。详见[故障排查](troubleshooting.md#spack-2026-2)。
 
 ## 为什么 GUI 的 CUDA 下拉在 spack 下没有 P100/V100？
 
