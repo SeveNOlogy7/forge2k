@@ -41,10 +41,10 @@ pub(crate) use generate::generate_dockerfile_content;
 // registry in `generate.rs` as the single source of truth.
 pub(crate) use generate::{validate_feature_arm, validate_features, KNOWN_FEATURES};
 
-// Test-only interior of the feature-preset API: the arm predicate is
-// consumed by `validate_feature_arm` inside generate.rs; the tests pin its
-// boundary directly.
-#[cfg(test)]
+// Arm predicate of the feature-preset API: `validate_feature_arm` inside
+// generate.rs consumes it, the tests pin its boundary directly, and the
+// GUI's advanced-options section drives its checkbox enable/disable state
+// from it.
 pub(crate) use generate::features_supported_arm;
 
 // ============================================================

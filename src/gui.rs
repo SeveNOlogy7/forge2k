@@ -1,6 +1,7 @@
 use crate::build;
 use anyhow::Result;
 use eframe::egui::{self, Color32, RichText, ScrollArea, Vec2};
+use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 
 // ============================================================
@@ -30,6 +31,21 @@ pub struct Forge2kApp {
     jobs: String,
     tag: String,
     shm_size: String,
+
+    // Advanced build options (CLI parity: --features / --no-cache /
+    // -f dockerfile / --force)
+    no_cache: bool,
+    force: bool,
+    /// Selected feature presets. Values only ever come from the
+    /// build-side `build::KNOWN_FEATURES` registry (checkbox toggles and
+    /// the load-time filter); the UI never hardcodes a feature name.
+    features: Vec<String>,
+    /// Raw draft of the custom Dockerfile path; empty = none. Stored
+    /// verbatim in settings; existence is checked on edit-commit.
+    dockerfile: String,
+    /// Cached verdict of the last on-commit existence check of
+    /// `dockerfile` (blur or Enter) — never recomputed per frame.
+    dockerfile_missing: bool,
 
     // Build state
     build_logs: Arc<Mutex<Vec<build::LogLine>>>,
@@ -64,6 +80,16 @@ impl Default for Forge2kApp {
         // Settings persist across restarts at <home>/.forge2k/settings.json;
         // a missing/corrupt file silently degrades to the defaults below.
         let settings = crate::settings::ForgeSettings::load();
+        // Ignore feature values outside the build-side registry: a
+        // hand-edited settings.json cannot inject unknown presets into the
+        // checkbox-driven selection.
+        let features: Vec<String> = settings
+            .features
+            .into_iter()
+            .filter(|f| build::KNOWN_FEATURES.contains(&f.as_str()))
+            .collect();
+        let dockerfile = settings.dockerfile;
+        let dockerfile_missing = !dockerfile.is_empty() && !Path::new(&dockerfile).exists();
         Self {
             method: "spack".into(),
             version: "2026.1".into(),
@@ -87,6 +113,11 @@ impl Default for Forge2kApp {
             configs_cache: build::list_available_configs(),
             mirror_input: settings.mirror_input,
             settings_message: String::new(),
+            no_cache: settings.no_cache,
+            force: settings.force,
+            features,
+            dockerfile,
+            dockerfile_missing,
             active_tab: Tab::Build,
             log_auto_scroll: true,
         }
@@ -94,12 +125,92 @@ impl Default for Forge2kApp {
 }
 
 impl Forge2kApp {
+    /// Pure state → `BuildConfig` mapping (no `ui` access): the single
+    /// place the Build tab's inputs become a `build::BuildConfig`, kept
+    /// ui-free so it can be unit-tested without a GUI context. The only
+    /// non-field logic is the CLI-parity auto-jobs resolution (`0` =
+    /// available parallelism).
+    fn collect_build_config(&self) -> build::BuildConfig {
+        let num_jobs: u32 = self.jobs.parse().unwrap_or(0);
+        let num_jobs = if num_jobs == 0 {
+            std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .unwrap_or(4)
+        } else {
+            num_jobs
+        };
+
+        build::BuildConfig {
+            method: self.method.clone(),
+            version: self.version.clone(),
+            mpi: self.mpi.clone(),
+            cpu: self.cpu.clone(),
+            cuda: self.cuda.clone(),
+            variant: self.variant.clone(),
+            jobs: num_jobs,
+            tag: if self.tag.is_empty() {
+                String::new()
+            } else {
+                self.tag.clone()
+            },
+            no_cache: self.no_cache,
+            dockerfile: if self.dockerfile.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(&self.dockerfile))
+            },
+            shm_size: self.shm_size.clone(),
+            features: self.features.clone(),
+        }
+    }
+
+    /// Pure validation of the advanced-option combination: non-empty =
+    /// invalid combination that must never reach the build layer. Mirrors
+    /// the CLI's up-front validation — the features/Dockerfile mutual
+    /// exclusion enforced by `BuildConfig::resolve_dockerfile` and the arm
+    /// rules enforced by `build::validate_feature_arm` — so START BUILD
+    /// fails fast with a readable reason instead of surfacing a mid-build
+    /// generator error.
+    fn build_config_blockers(&self) -> Vec<String> {
+        let mut blockers = Vec::new();
+        if !self.features.is_empty() && !self.dockerfile.is_empty() {
+            blockers.push(
+                "Feature presets and a custom Dockerfile are mutually exclusive \
+                 (feature presets only affect the synthesized Dockerfile): uncheck \
+                 the feature(s) or clear the Dockerfile path."
+                    .into(),
+            );
+        }
+        if let Err(e) = build::validate_feature_arm(&self.method, &self.version, &self.features) {
+            blockers.push(e.to_string());
+        }
+        blockers
+    }
+
     fn start_build(&mut self) {
         if *self
             .is_building
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
         {
+            return;
+        }
+
+        // Hard gate on invalid advanced-option combinations: refuse before
+        // any build state is touched.
+        let blockers = self.build_config_blockers();
+        if !blockers.is_empty() {
+            let mut logs = self
+                .build_logs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for blocker in &blockers {
+                logs.push(build::LogLine {
+                    timestamp: "ERROR".into(),
+                    text: blocker.clone(),
+                    level: build::LogLevel::Error,
+                });
+            }
             return;
         }
 
@@ -117,33 +228,7 @@ impl Forge2kApp {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = false;
 
-        let num_jobs: u32 = self.jobs.parse().unwrap_or(0);
-        let num_jobs = if num_jobs == 0 {
-            std::thread::available_parallelism()
-                .map(|n| n.get() as u32)
-                .unwrap_or(4)
-        } else {
-            num_jobs
-        };
-
-        let config = build::BuildConfig {
-            method: self.method.clone(),
-            version: self.version.clone(),
-            mpi: self.mpi.clone(),
-            cpu: self.cpu.clone(),
-            cuda: self.cuda.clone(),
-            variant: self.variant.clone(),
-            jobs: num_jobs,
-            tag: if self.tag.is_empty() {
-                String::new()
-            } else {
-                self.tag.clone()
-            },
-            no_cache: false,
-            dockerfile: None,
-            shm_size: self.shm_size.clone(),
-            features: Vec::new(),
-        };
+        let config = self.collect_build_config();
 
         let (tx, rx) = mpsc::channel::<build::LogLine>();
 
@@ -249,12 +334,17 @@ impl Forge2kApp {
     ///
     /// Called only from user-commit points in the Settings tab (edit
     /// committed via `changed()`, Apply, auto-detect, known-mirror "Use")
-    /// — never from the frame loop — so the file is written on real
-    /// changes only. Failures degrade to a red settings message instead
-    /// of panicking.
+    /// and the Build tab's advanced options (checkbox toggles, Dockerfile
+    /// edit committed via `changed()` + `lost_focus()`) — never from the
+    /// frame loop — so the file is written on real changes only. Failures
+    /// degrade to a red settings message instead of panicking.
     fn persist_settings(&mut self) {
         let settings = crate::settings::ForgeSettings {
             mirror_input: self.mirror_input.clone(),
+            no_cache: self.no_cache,
+            force: self.force,
+            features: self.features.clone(),
+            dockerfile: self.dockerfile.clone(),
         };
         if let Err(e) = settings.save() {
             self.settings_message = format!("❌ Failed to save settings: {:#}", e);
@@ -400,6 +490,7 @@ impl Forge2kApp {
                 .show_inside(ui, |ui| {
                     ScrollArea::vertical().show(ui, |ui| {
                         self.render_build_config_fields(ui);
+                        self.render_advanced_options(ui);
                         self.render_build_controls(ui, is_building_val);
                     });
                 });
@@ -623,6 +714,126 @@ impl Forge2kApp {
         ui.add_space(12.0);
     }
 
+    /// Advanced options of the Build tab (CLI parity): feature presets
+    /// (`--features`), no-cache (`--no-cache`), a custom Dockerfile
+    /// (`-f/--dockerfile`) and force (`--force`), in one collapsible
+    /// section.
+    ///
+    /// Registry-driven: the feature checkboxes iterate
+    /// `build::KNOWN_FEATURES` and their enable/disable state comes from
+    /// `build::features_supported_arm`, so this UI layer hardcodes neither
+    /// a feature name nor an arm rule. Every control persists on its
+    /// commit point via `persist_settings`.
+    fn render_advanced_options(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new(
+            RichText::new("高级选项 / Advanced Options")
+                .size(14.0)
+                .color(Color32::from_rgb(255, 200, 50)),
+        )
+        .default_open(false)
+        .show(ui, |ui| {
+            // ─── Feature presets (registry-driven, arm-linked) ───
+            ui.label(
+                RichText::new("Feature Presets (--features)")
+                    .size(12.0)
+                    .color(Color32::from_rgb(150, 150, 170)),
+            );
+            let features_supported = build::features_supported_arm(&self.method, &self.version);
+            ui.scope(|ui| {
+                if !features_supported {
+                    ui.disable();
+                }
+                for feature in build::KNOWN_FEATURES {
+                    let mut checked = self.features.iter().any(|selected| selected == feature);
+                    if ui.checkbox(&mut checked, feature).changed() {
+                        if checked {
+                            self.features.push(feature.to_string());
+                        } else {
+                            self.features.retain(|selected| selected != feature);
+                        }
+                        self.persist_settings();
+                    }
+                }
+            });
+            if !features_supported {
+                // Live reason for the grayed-out checkboxes (CUDA-dropdown
+                // precedent: a helper line instead of a mid-build error).
+                let reason = if self.method == "native" {
+                    "Feature presets are not supported by the native method (host build)"
+                } else if self.method == "spack" {
+                    "Feature presets require the toolchain method"
+                } else if self.version == "master" {
+                    "Feature presets are not available for master (its synthesized build step is frozen)"
+                } else {
+                    "Feature presets require CP2K v2026.1+ (release-cmake build arm)"
+                };
+                ui.label(
+                    RichText::new(reason)
+                        .size(10.0)
+                        .color(Color32::from_rgb(150, 150, 170)),
+                );
+            }
+            ui.add_space(6.0);
+
+            // ─── Custom Dockerfile (mutually exclusive with features) ───
+            ui.label(
+                RichText::new("Custom Dockerfile (optional, -f)")
+                    .size(12.0)
+                    .color(Color32::from_rgb(150, 150, 170)),
+            );
+            let dockerfile_edit = ui.add(
+                egui::TextEdit::singleline(&mut self.dockerfile)
+                    .desired_width(200.0)
+                    .hint_text("empty = bundled / auto-generated"),
+            );
+            // Existence is checked on edit-commit (blur / Enter), never
+            // per frame; the verdict is cached in `dockerfile_missing`.
+            if dockerfile_edit.changed() && dockerfile_edit.lost_focus() {
+                self.dockerfile_missing =
+                    !self.dockerfile.is_empty() && !Path::new(&self.dockerfile).exists();
+                self.persist_settings();
+            }
+            if self.dockerfile_missing {
+                ui.label(
+                    RichText::new(format!("❌ File not found: {}", self.dockerfile))
+                        .size(10.0)
+                        .color(Color32::from_rgb(255, 100, 100)),
+                );
+            }
+            // Live mutual-exclusion hint; start_build gates on the same
+            // rule, so the combination can never reach the build layer.
+            if !self.features.is_empty() && !self.dockerfile.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "❌ Feature presets and a custom Dockerfile are mutually \
+                         exclusive — uncheck the feature(s) or clear the path.",
+                    )
+                    .size(10.0)
+                    .color(Color32::from_rgb(255, 100, 100)),
+                );
+            }
+            ui.add_space(6.0);
+
+            // ─── Toggles ───
+            if ui
+                .checkbox(&mut self.no_cache, "No cache (--no-cache)")
+                .changed()
+            {
+                self.persist_settings();
+            }
+            if ui
+                .checkbox(
+                    &mut self.force,
+                    "Force build even if Docker is not running (--force)",
+                )
+                .changed()
+            {
+                self.persist_settings();
+            }
+            ui.add_space(12.0);
+        });
+    }
+
     /// Control area of the Build tab: start/cancel button, outcome status
     /// bar and build error display.
     fn render_build_controls(&mut self, ui: &mut egui::Ui, is_building_val: bool) {
@@ -649,7 +860,11 @@ impl Forge2kApp {
             .min_size(Vec2::new(240.0, 36.0));
             if ui.add(build_btn).clicked() {
                 self.check_docker();
-                if self.docker_running {
+                // --force parity: a forced build skips the Docker
+                // pre-flight refusal (the build itself may still fail if
+                // Docker is actually needed). Invalid advanced-option
+                // combinations are refused inside start_build either way.
+                if self.docker_running || self.force {
                     self.start_build();
                 } else {
                     // Will show error in log

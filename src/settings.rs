@@ -1,28 +1,51 @@
 //! Persistent GUI settings stored at `<home>/.forge2k/settings.json`.
 //!
-//! The [`ForgeSettings`] fields mirror the user-editable items of the GUI
-//! Settings tab (`render_settings_tab` in gui.rs) — nothing more, nothing
-//! invented. Any problem while loading (missing file or directory,
-//! unreadable or corrupt JSON, unresolvable home directory) degrades to
-//! `Default`; saving problems are returned as `Err` so the GUI can show
-//! them as a red settings message instead of panicking.
+//! The [`ForgeSettings`] fields mirror the user-editable inputs that must
+//! survive a restart: the Settings tab's mirror draft (`mirror_input`,
+//! `render_settings_tab` in gui.rs) and the Build tab's advanced options
+//! (`no_cache` / `force` / `features` / `dockerfile`,
+//! `render_advanced_options` in gui.rs) — nothing more, nothing invented.
+//! Every field carries `#[serde(default)]`, so a settings.json written by
+//! an older forge2k (carrying only `mirror_input`) loads without error and
+//! the absent keys fall back to `Default`. Any problem while loading
+//! (missing file or directory, unreadable or corrupt JSON, unresolvable
+//! home directory) degrades to `Default`; saving problems are returned as
+//! `Err` so the GUI can show them as a red settings message instead of
+//! panicking.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The one user-editable setting on the GUI Settings tab: the draft text
-/// of the "Mirror URL" input box.
+/// The persisted GUI inputs: the Settings tab mirror draft plus the Build
+/// tab's advanced options (CLI parity: `--no-cache`, `--force`,
+/// `--features`, `-f/--dockerfile`).
 ///
 /// (`current_mirror` is deliberately NOT here — it is Docker-daemon state
 /// owned by daemon.json via `build::get_registry_mirror`; duplicating it
-/// would create a second source of truth. `settings_message` is transient
-/// UI feedback and is equally not persisted.)
+/// would create a second source of truth. `settings_message` and the
+/// other transient UI feedback are equally not persisted.)
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ForgeSettings {
     /// Draft content of the "Mirror URL" text input (Settings tab).
     #[serde(default)]
     pub mirror_input: String,
+    /// Build tab: pass `--no-cache` to `docker build`.
+    #[serde(default)]
+    pub no_cache: bool,
+    /// Build tab: start the build even when the Docker pre-flight check
+    /// would refuse (CLI `--force` parity).
+    #[serde(default)]
+    pub force: bool,
+    /// Build tab: selected feature presets. The GUI only ever writes values
+    /// from `build::KNOWN_FEATURES`; unknown values are filtered out when
+    /// loading so a hand-edited settings.json cannot inject them.
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Build tab: raw draft of the custom Dockerfile path; empty = none.
+    /// Stored verbatim; existence is validated by the GUI on edit-commit.
+    #[serde(default)]
+    pub dockerfile: String,
 }
 
 /// Resolve the settings file location: `<home>/.forge2k/settings.json`,
@@ -108,6 +131,7 @@ mod tests {
         let path = scratch("roundtrip").join("settings.json");
         let original = ForgeSettings {
             mirror_input: "https://docker.mirrors.ustc.edu.cn".into(),
+            ..Default::default()
         };
         original.save_to_path(&path).expect("save must succeed");
         let loaded = ForgeSettings::load_from_path(&path).expect("load must succeed");
@@ -151,6 +175,28 @@ mod tests {
     }
 
     #[test]
+    fn load_old_settings_without_advanced_fields_degrades_to_defaults() {
+        // Backward compat: a settings.json written before the advanced
+        // Build-tab options existed carries only `mirror_input`; every
+        // `#[serde(default)]` field must fall back silently instead of
+        // failing the whole file.
+        let dir = scratch("backward_compat");
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{ "mirror_input": "https://docker.mirrors.ustc.edu.cn" }"#,
+        )
+        .expect("write old-style settings");
+        let loaded = ForgeSettings::load_from_path(&path).expect("old settings must load");
+        assert_eq!(loaded.mirror_input, "https://docker.mirrors.ustc.edu.cn");
+        assert!(!loaded.no_cache);
+        assert!(!loaded.force);
+        assert!(loaded.features.is_empty());
+        assert!(loaded.dockerfile.is_empty());
+    }
+
+    #[test]
     fn saved_json_uses_stable_field_names() {
         // Forward-compat guard: the on-disk key is part of the public
         // format. A silent field rename would orphan every existing user's
@@ -161,6 +207,7 @@ mod tests {
         let path = dir.join("settings.json");
         ForgeSettings {
             mirror_input: "https://mirror.example.com".into(),
+            ..Default::default()
         }
         .save_to_path(&path)
         .expect("save must succeed");
