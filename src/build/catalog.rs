@@ -219,3 +219,14 @@ pub fn list_available_configs() -> Vec<ConfigInfo> {
     });
     configs
 }
+
+/// The canonical `forge2k build ...` command line for a configuration: the
+/// single assembler behind both `list`'s "Build:" line (main.rs) and the
+/// GUI Configs tab's displayed/Copied command text, so the two can never
+/// drift apart.
+pub fn cli_build_command(c: &ConfigInfo) -> String {
+    format!(
+        "forge2k build -m {} -v {} --mpi {} --cpu {} --cuda {} --variant {}",
+        c.method, c.version, c.mpi, c.cpu, c.cuda, c.variant
+    )
+}

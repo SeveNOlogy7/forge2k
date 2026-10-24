@@ -483,14 +483,9 @@ fn cmd_list(method_filter: Option<String>, version_filter: Option<String>) -> Re
             format!("Variant={}", config.variant).bright_blue(),
         );
         println!(
-            "      {} forge2k build -m {} -v {} --mpi {} --cpu {} --cuda {} --variant {}",
+            "      {} {}",
             "Build:".dimmed(),
-            config.method,
-            config.version,
-            config.mpi,
-            config.cpu,
-            config.cuda,
-            config.variant,
+            build::cli_build_command(config)
         );
         println!();
     }

@@ -11,6 +11,7 @@ use std::sync::{mpsc, Arc, Mutex, PoisonError};
 #[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Build,
+    Configs,
     System,
     Settings,
     About,
@@ -124,6 +125,15 @@ pub struct Forge2kApp {
     // Refresh button — the frame loop never rescans dockerfiles/.
     configs_cache: Vec<build::ConfigInfo>,
 
+    // Configs tab (CLI `list` parity): method/version filters mirroring
+    // `list --method/--version`. `None` = All; method is only ever set to
+    // spack/toolchain (the CLI's value_parser enum — native is not listed).
+    browse_method: Option<String>,
+    browse_version: Option<String>,
+    /// Command line last copied via a Configs-tab Copy button, shown as
+    /// click feedback next to the filter row.
+    browse_copied: Option<String>,
+
     // Settings
     mirror_input: String,
     settings_message: String,
@@ -175,6 +185,9 @@ impl Default for Forge2kApp {
             #[cfg(windows)]
             restart_probe: Arc::new(Mutex::new(ProbeState::default())),
             configs_cache: build::list_available_configs(),
+            browse_method: None,
+            browse_version: None,
+            browse_copied: None,
             mirror_input: settings.mirror_input,
             settings_message: String::new(),
             no_cache: settings.no_cache,
@@ -628,6 +641,7 @@ impl eframe::App for Forge2kApp {
                 ui.add_space(8.0);
                 let tabs = [
                     ("🛠 Build", Tab::Build),
+                    ("📋 Configs", Tab::Configs),
                     ("📊 System", Tab::System),
                     ("⚙ Settings", Tab::Settings),
                     ("ℹ About", Tab::About),
@@ -658,6 +672,7 @@ impl eframe::App for Forge2kApp {
 
             match self.active_tab {
                 Tab::Build => self.render_build_tab(ui, ctx),
+                Tab::Configs => self.render_configs_tab(ui),
                 Tab::System => self.render_system_tab(ui),
                 Tab::Settings => self.render_settings_tab(ui),
                 Tab::About => self.render_about_tab(ui),
@@ -1983,6 +1998,201 @@ impl Forge2kApp {
             );
         });
     }
+
+    /// Configs tab: full preset-configuration browser, CLI `list` parity
+    /// (src/main.rs `cmd_list`). Data comes from the same
+    /// `build::list_available_configs()` scan the Build tab caches in
+    /// `configs_cache`; the tab's Refresh re-runs that scan on the UI
+    /// thread on purpose — it is one `read_dir` sweep of the bundled
+    /// dockerfiles/ directory (the same latency class as the Generate-Only
+    /// path), so a worker thread would only add plumbing for no
+    /// perceived-latency gain.
+    ///
+    /// No second sort/filter is invented here: `list_available_configs`
+    /// already returns entries ordered method → version (descending) →
+    /// mpi → cpu → cuda (src/build/catalog.rs), exactly the order
+    /// `cmd_list` prints, and the filters below mirror the CLI's
+    /// `--method` (spack/toolchain enum) and `--version` exact-match
+    /// semantics.
+    fn render_configs_tab(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.heading(
+            RichText::new("Available Build Configurations")
+                .size(15.0)
+                .color(Color32::from_rgb(255, 200, 50)),
+        );
+        ui.add_space(8.0);
+
+        // ─── Filter row (CLI `list --method/--version` parity) ───
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Method:")
+                    .size(12.0)
+                    .color(Color32::from_rgb(150, 150, 170)),
+            );
+            egui::ComboBox::from_id_salt("browse_method")
+                .selected_text(self.browse_method.as_deref().unwrap_or("All"))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.browse_method, None, "All");
+                    ui.selectable_value(&mut self.browse_method, Some("spack".into()), "spack");
+                    ui.selectable_value(
+                        &mut self.browse_method,
+                        Some("toolchain".into()),
+                        "toolchain",
+                    );
+                });
+
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Version:")
+                    .size(12.0)
+                    .color(Color32::from_rgb(150, 150, 170)),
+            );
+            // Version choices are the scanned versions of the currently
+            // selected method filter (All → every scanned version), the
+            // same set `list --method <m>` accepts.
+            let versions: Vec<String> = {
+                let mut vs: Vec<String> = self
+                    .configs_cache
+                    .iter()
+                    .filter(|c| self.browse_method.as_ref().is_none_or(|m| c.method == *m))
+                    .map(|c| c.version.clone())
+                    .collect();
+                vs.sort();
+                vs.dedup();
+                vs
+            };
+            egui::ComboBox::from_id_salt("browse_version")
+                .selected_text(self.browse_version.as_deref().unwrap_or("All"))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.browse_version, None, "All");
+                    for v in &versions {
+                        ui.selectable_value(&mut self.browse_version, Some(v.clone()), v);
+                    }
+                });
+
+            // Same single scan the Build tab's Refresh runs: swapping
+            // `configs_cache` feeds both tabs.
+            if ui.button("⟳ Refresh").clicked() {
+                self.configs_cache = build::list_available_configs();
+            }
+
+            // Click feedback for the last Copy press; the full command is
+            // on hover so the row stays compact.
+            if let Some(cmd) = self.browse_copied.clone() {
+                ui.label(
+                    RichText::new("✓ Copied to clipboard")
+                        .size(11.0)
+                        .color(Color32::from_rgb(80, 220, 100)),
+                )
+                .on_hover_text(cmd);
+            }
+        });
+        ui.add_space(8.0);
+
+        // ─── Filtered list (same filter semantics as cmd_list) ───
+        // Cloned once per frame from the cache so the render closure can
+        // borrow `self` mutably for the Copy path; the scan itself is not
+        // re-run here (frame loops never rescan dockerfiles/).
+        let configs: Vec<build::ConfigInfo> = self
+            .configs_cache
+            .iter()
+            .filter(|c| {
+                self.browse_method.as_ref().is_none_or(|m| c.method == *m)
+                    && self.browse_version.as_ref().is_none_or(|v| c.version == *v)
+            })
+            .cloned()
+            .collect();
+
+        if configs.is_empty() {
+            // CLI parity: cmd_list's "No configurations match the given
+            // filters." info line, in the same yellow as its ℹ marker.
+            ui.label(
+                RichText::new("ℹ No configurations match the given filters.")
+                    .size(13.0)
+                    .color(Color32::from_rgb(255, 200, 80)),
+            );
+            return;
+        }
+
+        ui.label(
+            RichText::new(format!(
+                "Showing {} of {} scanned configurations",
+                configs.len(),
+                self.configs_cache.len()
+            ))
+            .size(11.0)
+            .color(Color32::from_rgb(120, 120, 140)),
+        );
+        ui.add_space(4.0);
+
+        ScrollArea::vertical().show(ui, |ui| {
+            ui.add_space(2.0);
+            for (i, config) in configs.iter().enumerate() {
+                // Line 1 (CLI parity): "#N  description" + the synthesized
+                // marker, in the Build tab's amber synthesized style.
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("#{}", i + 1))
+                            .size(13.0)
+                            .strong()
+                            .color(Color32::from_rgb(255, 200, 50)),
+                    );
+                    ui.label(
+                        RichText::new(&config.description)
+                            .size(13.0)
+                            .color(Color32::from_rgb(120, 200, 255)),
+                    );
+                    if config.source == build::DockerfileSource::Synthesized {
+                        ui.label(
+                            RichText::new(
+                                "synthesized: no bundled Dockerfile, generated at build time",
+                            )
+                            .size(10.0)
+                            .color(Color32::from_rgb(255, 200, 80)),
+                        );
+                    }
+                });
+                // Line 2 (CLI parity): Method + Version + base image.
+                ui.label(
+                    RichText::new(format!(
+                        "      Method: {}/{} ({})",
+                        config.method, config.version, config.base_image
+                    ))
+                    .size(11.0)
+                    .color(Color32::from_rgb(160, 160, 180)),
+                );
+                // Line 3 (CLI parity): MPI / CPU / CUDA / Variant specs.
+                ui.label(
+                    RichText::new(format!(
+                        "      Specs: MPI={} / CPU={} / CUDA={} / Variant={}",
+                        config.mpi, config.cpu, config.cuda, config.variant
+                    ))
+                    .size(11.0)
+                    .color(Color32::from_rgb(120, 170, 255)),
+                );
+                // Line 4 (CLI parity): the copyable build command, from the
+                // single assembler `build::cli_build_command` — the same
+                // source cmd_list prints from.
+                ui.horizontal_wrapped(|ui| {
+                    let cmd = build::cli_build_command(config);
+                    ui.label(
+                        RichText::new(&cmd)
+                            .size(11.0)
+                            .family(egui::FontFamily::Monospace)
+                            .color(Color32::from_rgb(100, 180, 255)),
+                    );
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(cmd.clone());
+                        self.browse_copied = Some(cmd.clone());
+                    }
+                });
+                ui.add_space(10.0);
+                ui.separator();
+                ui.add_space(2.0);
+            }
+        });
+    }
 }
 
 // ============================================================
@@ -2025,4 +2235,36 @@ pub fn run_gui() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("GUI error: {}", e))?;
 
     Ok(())
+}
+
+// ============================================================
+// CLI `list` parity helper
+// ============================================================
+
+#[cfg(test)]
+mod config_tab_tests {
+    use super::*;
+
+    /// The Configs tab's Copy payload must reproduce the CLI `list`
+    /// "Build:" line character-for-character. Both sides consume the single
+    /// assembler `build::cli_build_command` (src/build/catalog.rs), so this
+    /// pins the shared output rather than a duplicated format string.
+    #[test]
+    fn cli_build_command_matches_cli_list_format() {
+        let c = build::ConfigInfo {
+            method: "toolchain".into(),
+            version: "2026.2".into(),
+            mpi: "mpich".into(),
+            cpu: "generic".into(),
+            cuda: "P100".into(),
+            variant: "psmp".into(),
+            base_image: String::new(),
+            description: String::new(),
+            source: build::DockerfileSource::Synthesized,
+        };
+        assert_eq!(
+            build::cli_build_command(&c),
+            "forge2k build -m toolchain -v 2026.2 --mpi mpich --cpu generic --cuda P100 --variant psmp"
+        );
+    }
 }

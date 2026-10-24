@@ -4,7 +4,7 @@ mod execute;
 mod generate;
 mod registry;
 
-pub use catalog::{list_available_configs, DockerfileSource};
+pub use catalog::{cli_build_command, list_available_configs, DockerfileSource};
 // DiskEntry is consumed structurally through DiskSpaceStatus by the CLI and
 // GUI (field access + `summary()`); only the status types need naming here.
 pub use docker::{
