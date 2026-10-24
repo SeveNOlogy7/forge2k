@@ -877,6 +877,16 @@ impl Forge2kApp {
                     .color(Color32::from_rgb(255, 200, 80)),
             );
         }
+        if self.method == "native" {
+            // native_version_list() deliberately leaves out 2026.2 (see its
+            // doc comment): surface that instead of letting the user wonder
+            // why the picker is narrower than the CLI --version string.
+            ui.label(
+                RichText::new("2026.2 has no verified native build matrix yet")
+                    .size(10.0)
+                    .color(Color32::from_rgb(150, 150, 170)),
+            );
+        }
         ui.add_space(6.0);
 
         // MPI
@@ -889,6 +899,12 @@ impl Forge2kApp {
             "toolchain" => vec!["mpich"],
             _ => vec!["mpich", "openmpi"],
         };
+        // Stale-value fallback, same pattern as CUDA/CPU below: switching to
+        // toolchain narrows the set to mpich, so an openmpi selection carried
+        // over from spack must not leak into the build config.
+        if !mpis.iter().any(|m| *m == self.mpi) {
+            self.mpi = "mpich".into();
+        }
         egui::ComboBox::from_id_salt("mpi")
             .selected_text(&self.mpi)
             .show_ui(ui, |ui| {
@@ -906,6 +922,11 @@ impl Forge2kApp {
         );
         let cpus: Vec<&str> = match self.method.as_str() {
             "toolchain" => vec!["generic"],
+            // Native Step 0 whitelist (validate_native_config,
+            // build/execute.rs): cpu in {'generic', 'x86_64'} — 'x86_64' is
+            // translated to 'generic' for the toolchain script, every other
+            // target is rejected outright, so the picker must not offer it.
+            "native" => vec!["x86_64", "generic"],
             _ => vec![
                 "x86_64",
                 "cascadelake",
@@ -914,6 +935,16 @@ impl Forge2kApp {
                 "generic",
             ],
         };
+        if !cpus.iter().any(|c| *c == self.cpu) {
+            // Method switched to one that no longer offers the current
+            // target (e.g. x86_64 on toolchain, cascadelake on native):
+            // fall back to 'generic', the one target valid across all three
+            // methods — mirroring the CUDA reset below. Without this, the
+            // stale selection would ride collect_build_config into the
+            // build (the synthesized toolchain script rejects a literal
+            // --target-cpu=x86_64, and native Step 0 rejects the rest).
+            self.cpu = "generic".into();
+        }
         egui::ComboBox::from_id_salt("cpu")
             .selected_text(&self.cpu)
             .show_ui(ui, |ui| {
@@ -924,8 +955,10 @@ impl Forge2kApp {
         ui.add_space(6.0);
 
         // CUDA (options come from the build-side support matrix so the GUI
-        // can never offer a combination the executor would reject; an empty
-        // set — e.g. native — renders the control disabled)
+        // can never offer a combination the executor would reject: spack is
+        // CPU-only, toolchain/native carry the bundled none/P100/V100 set —
+        // native + master stays a build-time Step 0 rejection; an empty set
+        // — only unknown methods — renders the control disabled)
         ui.label(
             RichText::new("CUDA Support")
                 .size(12.0)
@@ -951,7 +984,7 @@ impl Forge2kApp {
         });
         if cuda_options.is_empty() {
             ui.label(
-                RichText::new("CUDA is not supported by the native method (host build)")
+                RichText::new("CUDA is not supported by this build method")
                     .size(10.0)
                     .color(Color32::from_rgb(150, 150, 170)),
             );
