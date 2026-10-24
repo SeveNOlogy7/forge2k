@@ -203,7 +203,7 @@ src/
 
 ```bash
 cargo check                  # 编译检查
-cargo test                   # 单元 + 行为测试（28 个，不依赖 Docker daemon）
+cargo test                   # 单元 + 行为测试（不依赖 Docker daemon）
 cargo clippy --all-targets -- -D warnings  # lint 门禁（CI 同款口径）
 cargo fmt --check            # 格式门禁
 ```
