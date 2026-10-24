@@ -2301,3 +2301,298 @@ mod config_tab_tests {
         );
     }
 }
+
+// ============================================================
+// Advanced Options tests (plan T08): the pure-state surface of the
+// Build tab's advanced options — `collect_build_config` mapping,
+// `build_config_blockers` rules, the testable kernel of "Generate
+// Only" (collect_build_config + resolve_dockerfile) and the T07
+// value-linkage regression pins. Rendering itself stays untested
+// (egui context); everything decided before a pixel is drawn is here.
+// ============================================================
+
+#[cfg(test)]
+mod advanced_options_tests {
+    use super::*;
+
+    /// Fresh app with the settings-backed advanced fields forced to their
+    /// pristine values: `Forge2kApp::default()` loads the real user
+    /// `<home>/.forge2k/settings.json`, so every test that pins defaults
+    /// must set these explicitly before asserting. Nothing here writes
+    /// settings back (no `persist_settings` call from tests).
+    fn pristine_app() -> Forge2kApp {
+        Forge2kApp {
+            no_cache: false,
+            force: false,
+            features: Vec::new(),
+            dockerfile: String::new(),
+            dockerfile_missing: false,
+            ..Forge2kApp::default()
+        }
+    }
+
+    // --------------------------------------------------------
+    // collect_build_config: state → BuildConfig mapping
+    // --------------------------------------------------------
+
+    /// What a fresh app maps into BuildConfig: base fields at their GUI
+    /// defaults, advanced options empty, empty tag kept empty, and jobs
+    /// auto-resolved (`"0"` = auto is the GUI default).
+    #[test]
+    fn t08_map_defaults_from_fresh_app() {
+        let app = pristine_app();
+        let c = app.collect_build_config();
+        assert_eq!(c.method, "spack");
+        assert_eq!(c.version, "2026.1");
+        assert_eq!(c.mpi, "mpich");
+        assert_eq!(c.cpu, "x86_64");
+        assert_eq!(c.cuda, "none");
+        assert_eq!(c.variant, "psmp");
+        assert_eq!(c.shm_size, "1g");
+        assert!(!c.no_cache, "no_cache default must be false");
+        assert!(c.features.is_empty(), "features default must be empty");
+        assert_eq!(
+            c.dockerfile, None,
+            "empty dockerfile draft must map to None"
+        );
+        assert_eq!(c.tag, "", "empty tag must stay the empty string");
+        assert!(c.jobs > 0, "jobs=0 (auto) must never map to 0");
+    }
+
+    /// Non-empty advanced options map verbatim: a non-empty dockerfile
+    /// draft becomes Some(PathBuf), features keep their selection, the
+    /// tag passes through and no_cache carries the checkbox. The path need
+    /// not exist — collect_build_config maps the draft as-is (existence is
+    /// the separate blur-commit verdict cached in `dockerfile_missing`).
+    #[test]
+    fn t08_map_advanced_options_passthrough() {
+        let mut app = pristine_app();
+        app.no_cache = true;
+        app.features = vec!["deepmd".to_string()];
+        app.dockerfile = "some/custom.Dockerfile".to_string();
+        app.tag = "mytag".to_string();
+        app.jobs = "4".to_string();
+        let c = app.collect_build_config();
+        assert!(c.no_cache);
+        assert_eq!(c.features, vec!["deepmd".to_string()]);
+        assert_eq!(
+            c.dockerfile,
+            Some(PathBuf::from("some/custom.Dockerfile")),
+            "non-empty dockerfile draft must map to Some(PathBuf) verbatim"
+        );
+        assert_eq!(c.tag, "mytag");
+        assert_eq!(c.jobs, 4);
+    }
+
+    /// jobs resolution (CLI parity): `"0"` and unparsable junk both fall
+    /// back to the host's available parallelism, never 0; a real number
+    /// passes through untouched.
+    #[test]
+    fn t08_map_jobs_auto_resolution() {
+        let expected = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(4);
+
+        let mut app = pristine_app();
+        app.jobs = "0".to_string();
+        assert_eq!(
+            app.collect_build_config().jobs,
+            expected,
+            "jobs=0 must auto-resolve"
+        );
+
+        app.jobs = "not-a-number".to_string();
+        assert_eq!(
+            app.collect_build_config().jobs,
+            expected,
+            "unparsable jobs must fall back to auto"
+        );
+
+        app.jobs = "3".to_string();
+        assert_eq!(
+            app.collect_build_config().jobs,
+            3,
+            "explicit jobs must pass through"
+        );
+    }
+
+    // --------------------------------------------------------
+    // build_config_blockers: invalid combinations refused up front
+    // --------------------------------------------------------
+
+    /// The one supported feature combination: deepmd on the toolchain
+    /// release-cmake arm (v2026.1, not master).
+    #[test]
+    fn t08_blockers_toolchain_2026_1_deepmd_is_clean() {
+        let mut app = pristine_app();
+        app.method = "toolchain".to_string();
+        app.version = "2026.1".to_string();
+        app.features = vec!["deepmd".to_string()];
+        assert!(
+            app.build_config_blockers().is_empty(),
+            "deepmd on toolchain/2026.1 is the supported arm and must not block"
+        );
+    }
+
+    /// spack carries no feature arm: the blocker must say the presets
+    /// require the toolchain method (the same rule the build layer
+    /// enforces, surfaced before START BUILD).
+    #[test]
+    fn t08_blockers_spack_deepmd_names_the_toolchain_requirement() {
+        let mut app = pristine_app();
+        app.method = "spack".to_string();
+        app.version = "2026.1".to_string();
+        app.features = vec!["deepmd".to_string()];
+        let blockers = app.build_config_blockers();
+        assert_eq!(blockers.len(), 1, "exactly the arm rule must fire");
+        assert!(
+            blockers[0].contains("toolchain"),
+            "blocker must name the toolchain requirement, got: {}",
+            blockers[0]
+        );
+    }
+
+    /// master freezes its synthesized build step: features never apply,
+    /// even on the toolchain method.
+    #[test]
+    fn t08_blockers_master_deepmd_rejected() {
+        let mut app = pristine_app();
+        app.method = "toolchain".to_string();
+        app.version = "master".to_string();
+        app.features = vec!["deepmd".to_string()];
+        let blockers = app.build_config_blockers();
+        assert!(!blockers.is_empty(), "master + deepmd must be blocked");
+        assert!(
+            blockers[0].contains("toolchain"),
+            "blocker must carry the arm requirement, got: {}",
+            blockers[0]
+        );
+    }
+
+    /// features + custom Dockerfile are mutually exclusive (the build
+    /// layer's resolve_dockerfile rule, mirrored by the GUI gate); with
+    /// the arm otherwise legal, this is the only blocker.
+    #[test]
+    fn t08_blockers_features_and_dockerfile_are_mutually_exclusive() {
+        let mut app = pristine_app();
+        app.method = "toolchain".to_string();
+        app.version = "2026.1".to_string();
+        app.features = vec!["deepmd".to_string()];
+        app.dockerfile = "some/custom.Dockerfile".to_string();
+        let blockers = app.build_config_blockers();
+        assert_eq!(
+            blockers.len(),
+            1,
+            "the arm rule passes here; only the mutual exclusion may fire"
+        );
+        assert!(
+            blockers[0].contains("mutually exclusive"),
+            "the mutual-exclusion blocker must say so, got: {}",
+            blockers[0]
+        );
+    }
+
+    /// With both advanced options empty nothing blocks — for any method/
+    /// version, including combinations where an *arm* rule would fire if
+    /// features were set.
+    #[test]
+    fn t08_blockers_no_advanced_options_is_clean() {
+        let mut app = pristine_app();
+        assert!(app.build_config_blockers().is_empty());
+        app.method = "native".to_string();
+        app.version = "master".to_string();
+        assert!(app.build_config_blockers().is_empty());
+    }
+
+    // --------------------------------------------------------
+    // "Generate Only" testable kernel: the exact pair generate_only
+    // runs after its gate — collect_build_config + resolve_dockerfile.
+    // Synthesis writes into %TEMP%/forge2k/, the same side effect as
+    // CLI --generate-only; files are left in the temp dir (no cleanup).
+    // --------------------------------------------------------
+
+    #[test]
+    fn t08_generate_only_kernel_synthesizes_into_temp_forge2k() {
+        let mut app = pristine_app();
+        app.method = "toolchain".to_string();
+        app.version = "2026.1".to_string();
+        assert!(
+            app.build_config_blockers().is_empty(),
+            "the kernel config must pass the GUI gate"
+        );
+
+        // toolchain/2026.1 has no bundled Dockerfile (dockerfiles/toolchain/
+        // ships 2023.2/2025.2 only), so resolve must synthesize. The
+        // preview's `synthesized` flag is exactly the starts_with predicate
+        // asserted here.
+        let config = app.collect_build_config();
+        let path = config
+            .resolve_dockerfile()
+            .expect("toolchain/2026.1 must resolve via synthesis");
+        let temp_root = std::env::temp_dir().join("forge2k");
+        assert!(
+            path.starts_with(&temp_root),
+            "synthesized path must live under {}, got: {}",
+            temp_root.display(),
+            path.display()
+        );
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("synthesis must write a readable file: {e}"));
+        assert!(
+            content.contains("FROM") && !content.contains("{{"),
+            "synthesized file must be a fully rendered Dockerfile"
+        );
+    }
+
+    /// Layering pin: a combination the GUI gate blocks is also refused by
+    /// the build layer itself, so generate_only's gate is fail-fast UX,
+    /// not the only guard.
+    #[test]
+    fn t08_generate_only_kernel_blocked_combo_refused_by_build_layer() {
+        let mut app = pristine_app();
+        app.method = "spack".to_string();
+        app.features = vec!["deepmd".to_string()];
+        assert!(
+            !app.build_config_blockers().is_empty(),
+            "the GUI gate must block spack + deepmd"
+        );
+        let err = app
+            .collect_build_config()
+            .resolve_dockerfile()
+            .expect_err("the build layer must refuse the same combination");
+        assert!(
+            err.to_string().contains("toolchain"),
+            "build-layer error must name the arm requirement, got: {}",
+            err
+        );
+    }
+
+    // --------------------------------------------------------
+    // Value-linkage regression pins (T07): the pickers render the
+    // build-side matrix, never a GUI-local copy.
+    // --------------------------------------------------------
+
+    #[test]
+    fn t08_linkage_native_cuda_options_are_three_values() {
+        assert_eq!(
+            build::cuda_options_for_method("native"),
+            vec!["none", "P100", "V100"],
+            "the native CUDA dropdown must offer exactly the bundled toolchain set"
+        );
+    }
+
+    #[test]
+    fn t08_linkage_native_version_list_excludes_2026_2() {
+        let versions = native_version_list();
+        assert!(
+            !versions.iter().any(|v| v == "2026.2"),
+            "2026.2 native is unverified and must stay out of the picker (T07)"
+        );
+        for expected in ["master", "2026.1", "2025.2", "2024.3"] {
+            assert!(
+                versions.iter().any(|v| v == expected),
+                "native picker must advertise {expected}"
+            );
+        }
+    }
+}
