@@ -1,8 +1,14 @@
 # Forge2K
 
+[![CI](https://github.com/SeveNOlogy7/forge2k/actions/workflows/ci.yml/badge.svg)](https://github.com/SeveNOlogy7/forge2k/actions/workflows/ci.yml)
+[![Docs](https://github.com/SeveNOlogy7/forge2k/actions/workflows/docs.yml/badge.svg)](https://sevenology7.github.io/forge2k/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 一键构建 CP2K Docker 镜像的 GUI + CLI 工具（Rust 编写）。
 
 Forge2K 自动探测 Docker 引擎、选择或生成 Dockerfile、流式输出构建日志，并支持 Windows / Linux / macOS。支持 Spack 构建（CP2K v2025.2+）、Toolchain 构建（v2023.2+）、master 分支构建，以及主机直连的 native 构建。
+
+📖 **完整使用手册（doc 站）**：[https://sevenology7.github.io/forge2k/](https://sevenology7.github.io/forge2k/)——安装指南、CLI 全参考、构建方法详解、GUI 指南、故障排查 / FAQ、开发指南与 [CLI↔GUI 覆盖率矩阵](https://sevenology7.github.io/forge2k/coverage.html)。
 
 ## 系统需求
 
