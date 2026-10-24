@@ -16,6 +16,22 @@ enum Tab {
     About,
 }
 
+/// Payload of an in-GUI Dockerfile preview ("Generate Only", CLI
+/// `--generate-only` parity): the file that `BuildConfig::resolve_dockerfile`
+/// picked — bundled, custom `-f`, or freshly synthesized into
+/// `%TEMP%/forge2k/` — plus its full content read back for display.
+#[derive(Clone)]
+struct DockerfilePreview {
+    /// Resolved Dockerfile path, shown verbatim in the preview panel.
+    path: PathBuf,
+    /// Full file content, shown in a read-only code-style view.
+    content: String,
+    /// True when this action synthesized (and wrote) the file — the same
+    /// write side effect as the CLI's `--generate-only`; false when an
+    /// existing bundled/custom Dockerfile was resolved as-is.
+    synthesized: bool,
+}
+
 // ============================================================
 // Application State
 // ============================================================
@@ -53,6 +69,12 @@ pub struct Forge2kApp {
     cancel_flag: Arc<Mutex<bool>>,
     build_error: Arc<Mutex<Option<String>>>,
     build_status: Arc<Mutex<Option<build::BuildOutcome>>>,
+
+    /// Result of the last "Generate Only" action (CLI `--generate-only`
+    /// parity). `Some` keeps the floating preview window open — `Ok` shows
+    /// the resolved/synthesized Dockerfile, `Err` its failure reason; `None`
+    /// means closed/discarded.
+    generate_preview: Option<Result<DockerfilePreview, String>>,
 
     // System state
     docker_status: String,
@@ -105,6 +127,7 @@ impl Default for Forge2kApp {
             cancel_flag: Arc::new(Mutex::new(false)),
             build_error: Arc::new(Mutex::new(None)),
             build_status: Arc::new(Mutex::new(None)),
+            generate_preview: None,
             docker_status: "Not checked".into(),
             docker_running: false,
             docker_checked: false,
@@ -291,6 +314,90 @@ impl Forge2kApp {
             .unwrap_or_else(PoisonError::into_inner) = true;
     }
 
+    /// CLI `--generate-only` parity: resolve or synthesize the Dockerfile for
+    /// the current Build-tab configuration and open the preview window with
+    /// its content and path. No build is started and Docker is not probed —
+    /// the CLI skips its Docker gate for `--generate-only`, so this stays
+    /// usable while Docker is down.
+    ///
+    /// The hard gate is START BUILD's: `build_config_blockers` refuses
+    /// invalid advanced-option combinations before any synthesis side
+    /// effect. Every failure (illegal combination, generator error,
+    /// unreadable file) lands as ERROR lines in the build log AND inside
+    /// the preview panel.
+    ///
+    /// Runs on the UI thread on purpose: the work is one in-memory template
+    /// render plus one small (few KiB) file write + read, far below a
+    /// noticeable frame hitch — a worker thread would only add state
+    /// plumbing for no perceived-latency gain.
+    fn generate_only(&mut self) {
+        // START BUILD's hard gate, verbatim: refuse invalid combinations
+        // before anything is synthesized.
+        let blockers = self.build_config_blockers();
+        if !blockers.is_empty() {
+            let mut logs = self
+                .build_logs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for blocker in &blockers {
+                logs.push(build::LogLine {
+                    timestamp: "ERROR".into(),
+                    text: blocker.clone(),
+                    level: build::LogLevel::Error,
+                });
+            }
+            self.generate_preview = Some(Err(blockers.join("\n")));
+            return;
+        }
+
+        let config = self.collect_build_config();
+        let result = config.resolve_dockerfile().and_then(|path| {
+            // The generator writes synthesized files into %TEMP%/forge2k/;
+            // anything else is a bundled or custom `-f` Dockerfile that was
+            // resolved as-is (no file written by this action).
+            let synthesized = path.starts_with(std::env::temp_dir().join("forge2k"));
+            let content = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to read the resolved Dockerfile {}: {e}",
+                    path.display()
+                )
+            })?;
+            Ok(DockerfilePreview {
+                path,
+                content,
+                synthesized,
+            })
+        });
+
+        match result {
+            Ok(preview) => {
+                // CLI parity message ("Generated Dockerfile: <path>") in the
+                // build log area, with the same timestamp format as the
+                // build engine's log lines.
+                self.build_logs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(build::LogLine {
+                        timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                        text: format!("Generated Dockerfile: {}", preview.path.display()),
+                        level: build::LogLevel::Info,
+                    });
+                self.generate_preview = Some(Ok(preview));
+            }
+            Err(e) => {
+                self.build_logs
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(build::LogLine {
+                        timestamp: "ERROR".into(),
+                        text: e.to_string(),
+                        level: build::LogLevel::Error,
+                    });
+                self.generate_preview = Some(Err(e.to_string()));
+            }
+        }
+    }
+
     fn check_docker(&mut self) {
         match build::check_docker() {
             build::DockerStatus::Installed { version, running } => {
@@ -475,7 +582,7 @@ impl eframe::App for Forge2kApp {
 // ============================================================
 
 impl Forge2kApp {
-    fn render_build_tab(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
+    fn render_build_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let is_building_val = *self
             .is_building
             .lock()
@@ -500,6 +607,87 @@ impl Forge2kApp {
                 self.render_build_log_panel(ui, is_building_val);
             });
         });
+
+        // Floating preview window (opened by "Generate Only"); a no-op while
+        // `generate_preview` is None.
+        self.render_dockerfile_preview(ctx);
+    }
+
+    /// Floating preview window for the last "Generate Only" action:
+    /// scrolling read-only Dockerfile text in code style, the resolved path
+    /// (with the `%TEMP%/forge2k/` write side effect called out for
+    /// synthesized files) and an explicit Close button. Failures (illegal
+    /// combinations, generator errors) render here too, next to the button
+    /// that triggered them. Closable via the title-bar X or the Close
+    /// button; either sets `generate_preview = None`.
+    fn render_dockerfile_preview(&mut self, ctx: &egui::Context) {
+        // Clone out so the closure can take `&mut self` for the Close path.
+        let Some(preview) = self.generate_preview.clone() else {
+            return;
+        };
+        let mut open = true;
+        egui::Window::new(
+            RichText::new("📄 Dockerfile 预览 / Dockerfile Preview")
+                .size(14.0)
+                .color(Color32::from_rgb(255, 200, 50))
+                .strong(),
+        )
+        .open(&mut open)
+        .default_size(Vec2::new(680.0, 480.0))
+        .resizable(true)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            match &preview {
+                Ok(p) => {
+                    ui.label(
+                        RichText::new(if p.synthesized {
+                            format!(
+                                "Synthesized & written (same side effect as CLI --generate-only): {}",
+                                p.path.display()
+                            )
+                        } else {
+                            format!(
+                                "Resolved bundled/custom Dockerfile (nothing written): {}",
+                                p.path.display()
+                            )
+                        })
+                        .size(11.0)
+                        .family(egui::FontFamily::Monospace)
+                        .color(Color32::from_rgb(100, 180, 255)),
+                    );
+                    ui.add_space(4.0);
+                    let frame = egui::Frame::dark_canvas(ui.style())
+                        .fill(Color32::from_rgb(10, 10, 16));
+                    frame.show(ui, |ui| {
+                        ScrollArea::vertical().show(ui, |ui| {
+                            ui.add_space(4.0);
+                            // `&mut &str` buffer + code_editor(): read-only
+                            // monospace view, exactly what the requirement
+                            // asks for (display, not editing).
+                            ui.add(
+                                egui::TextEdit::multiline(&mut p.content.as_str())
+                                    .code_editor()
+                                    .desired_width(ui.available_width()),
+                            );
+                        });
+                    });
+                }
+                Err(reason) => {
+                    ui.label(
+                        RichText::new(format!("❌ Generation failed:\n{reason}"))
+                            .size(12.0)
+                            .color(Color32::from_rgb(255, 100, 100)),
+                    );
+                }
+            }
+            ui.add_space(6.0);
+            if ui.button("Close").clicked() {
+                self.generate_preview = None;
+            }
+        });
+        if !open {
+            self.generate_preview = None;
+        }
     }
 
     /// Configuration area of the Build tab: method/version/mpi/cpu/cuda/
@@ -879,6 +1067,28 @@ impl Forge2kApp {
                     });
                 }
             }
+        }
+
+        // "Generate Only" (CLI --generate-only parity): resolve/synthesize
+        // the Dockerfile and preview it in-app without starting a build or
+        // requiring Docker. Disabled while a build is running (same hard
+        // gate and config snapshot as START BUILD).
+        ui.add_space(4.0);
+        let gen_btn = egui::Button::new(RichText::new("📄 Generate Only").size(12.0).color(
+            if is_building_val {
+                Color32::from_rgb(120, 120, 140)
+            } else {
+                Color32::from_rgb(160, 200, 255)
+            },
+        ))
+        .fill(if is_building_val {
+            Color32::from_rgb(30, 30, 40)
+        } else {
+            Color32::from_rgb(40, 40, 60)
+        })
+        .min_size(Vec2::new(240.0, 26.0));
+        if ui.add_enabled(!is_building_val, gen_btn).clicked() {
+            self.generate_only();
         }
 
         // Build result status bar (outcome-driven)
