@@ -5,7 +5,12 @@ mod generate;
 mod registry;
 
 pub use catalog::{list_available_configs, DockerfileSource};
-pub use docker::{check_docker, print_docker_install_guide, restart_docker, DockerStatus};
+// DiskEntry is consumed structurally through DiskSpaceStatus by the CLI and
+// GUI (field access + `summary()`); only the status types need naming here.
+pub use docker::{
+    check_buildkit, check_docker, check_docker_storage, print_docker_install_guide, restart_docker,
+    BuildKitStatus, DiskSpaceStatus, DockerStatus, DockerStorageStatus,
+};
 pub use execute::{cuda_options_for_method, execute_build, execute_native_build};
 pub use registry::{
     check_registry, daemon_config_path, detect_best_mirror, get_registry_mirror,
@@ -32,6 +37,10 @@ use std::time::Duration;
 // `use super::*;` in `mod tests` resolves them unchanged.
 #[cfg(test)]
 pub(crate) use catalog::dockerfile_search_paths;
+#[cfg(all(test, target_os = "windows"))]
+pub(crate) use docker::drive_letter_of;
+#[cfg(test)]
+pub(crate) use docker::{format_bytes, parse_cim_disk_lines, parse_df_output};
 #[cfg(test)]
 pub(crate) use execute::{run_cmd_logged, CmdStatus};
 #[cfg(test)]

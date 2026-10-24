@@ -602,55 +602,36 @@ fn cmd_check() -> Result<()> {
     }
     println!();
 
-    // Check storage
-    let docker_info = std::process::Command::new("docker")
-        .args(["info", "--format", "{{.DockerRootDir}}"])
-        .output();
-    if let Ok(out) = docker_info {
-        if out.status.success() {
-            let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            println!("{}", "── Docker Storage ──".cyan().bold());
-            println!("  Root directory: {}", root.cyan());
-
-            // Check disk space (platform-specific)
-            #[cfg(target_os = "windows")]
-            {
-                let df = std::process::Command::new("wmic")
-                    .args([
-                        "logicaldisk",
-                        "where",
-                        "drivetype=3",
-                        "get",
-                        "deviceid,freespace",
-                    ])
-                    .output();
-                if let Ok(df) = df {
-                    println!("  {}", String::from_utf8_lossy(&df.stdout).trim());
+    // Check storage — shared probe, also reused by the GUI System tab.
+    // Windows uses PowerShell `Get-CimInstance Win32_LogicalDisk`: wmic was
+    // removed on Windows 11 24H2+ (build 26100+), so the old inline
+    // `wmic logicaldisk` call produced empty output on current systems.
+    let storage = build::check_docker_storage();
+    println!("{}", "── Docker Storage ──".cyan().bold());
+    match &storage.root_dir {
+        Some(root) => println!("  Root directory: {}", root.cyan()),
+        None => println!(
+            "  {} Docker root directory unknown (daemon not reachable)",
+            "?".yellow()
+        ),
+    }
+    match &storage.disk {
+        build::DiskSpaceStatus::Ok(entries) => {
+            for entry in entries {
+                // Drive-letter volumes get their `C:` prefix; the common
+                // single-mount `df` case keeps the historical bare format.
+                if entry.volume.len() == 2 && entry.volume.ends_with(':') {
+                    println!("  {} {}", entry.volume.cyan(), entry.summary());
+                } else {
+                    println!("  {}", entry.summary());
                 }
             }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let df = std::process::Command::new("df")
-                    .args(["-h", &root])
-                    .output();
-                if let Ok(df) = df {
-                    let out = String::from_utf8_lossy(&df.stdout);
-                    for line in out.lines().skip(1) {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if parts.len() >= 4 {
-                            println!(
-                                "  Available: {} (used: {} of {})",
-                                parts[3].cyan(),
-                                parts[2],
-                                parts[1]
-                            );
-                        }
-                    }
-                }
-            }
-            println!();
+        }
+        build::DiskSpaceStatus::Unknown(reason) => {
+            println!("  {} Disk space: {}", "?".yellow(), reason.dimmed());
         }
     }
+    println!();
 
     // Summary
     println!("{}", "── Summary ──".cyan().bold());

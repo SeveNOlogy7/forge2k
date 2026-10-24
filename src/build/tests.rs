@@ -2804,3 +2804,99 @@ fn t_fix_openblas_patch_is_deepmd_arm_only() {
         }
     }
 }
+
+// --------------------------------------------------------
+// System diagnostics: BuildKit & Docker storage probes
+// (shared by CLI `check` and the GUI System tab). The probe
+// entry points spawn subprocesses, so the tests pin the pure
+// parsing/formatting layers they are built on.
+// --------------------------------------------------------
+
+#[test]
+fn t_check_parse_cim_disk_lines_parses_cim_rows() {
+    let entries =
+        parse_cim_disk_lines("C:|999871418368|326829953024\nD:|2000396742656|1335104663552\n");
+    assert_eq!(entries.len(), 2, "both CIM rows must parse");
+    assert_eq!(entries[0].volume, "C:");
+    assert_eq!(entries[0].free, format_bytes(326829953024));
+    assert_eq!(
+        entries[0].used,
+        format_bytes(999871418368 - 326829953024),
+        "used must be derived as size - free"
+    );
+    assert_eq!(entries[0].total, format_bytes(999871418368));
+    assert_eq!(entries[1].volume, "D:");
+    assert_eq!(entries[1].free, format_bytes(1335104663552));
+}
+
+#[test]
+fn t_check_parse_cim_disk_lines_skips_blank_and_unparsable_rows() {
+    // Blank lines skipped; a row without a parsable free-space value is
+    // dropped; a missing size degrades that row's total/used to empty.
+    let entries = parse_cim_disk_lines("\nC:||326829953024\nD:|2000396742656|not-a-number\n");
+    assert_eq!(
+        entries.len(),
+        1,
+        "only the size-less but parseable C: row survives"
+    );
+    assert_eq!(entries[0].volume, "C:");
+    assert!(entries[0].total.is_empty());
+    assert!(entries[0].used.is_empty());
+    assert_eq!(entries[0].free, format_bytes(326829953024));
+    assert_eq!(
+        entries[0].summary(),
+        format!("Available: {}", format_bytes(326829953024)),
+        "summary degrades to free-only without totals"
+    );
+}
+
+#[test]
+fn t_check_parse_df_output_matches_check_columns() {
+    let df = "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1       130G   88G   42G  68% /\n";
+    let entries = parse_df_output(df);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].volume, "/dev/sda1");
+    assert_eq!(entries[0].total, "130G");
+    assert_eq!(entries[0].used, "88G");
+    assert_eq!(entries[0].free, "42G");
+    assert_eq!(
+        entries[0].summary(),
+        "Available: 42G (used: 88G of 130G)",
+        "the df summary must reproduce the historical check output format"
+    );
+}
+
+#[test]
+fn t_check_parse_df_output_skips_header_and_short_lines() {
+    assert!(parse_df_output("").is_empty());
+    assert!(parse_df_output("Filesystem Size Used Avail Use% Mounted on\n").is_empty());
+}
+
+#[test]
+fn t_check_format_bytes_units() {
+    assert_eq!(format_bytes(512), "512 B");
+    assert_eq!(format_bytes(2048), "2.0 KB");
+    assert_eq!(format_bytes(5 * 1024 * 1024), "5.0 MB");
+    assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    assert_eq!(format_bytes(326_829_953_024), "304.4 GB");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
+fn t_check_drive_letter_of_windows_roots() {
+    assert_eq!(
+        drive_letter_of(r"C:\ProgramData\docker").as_deref(),
+        Some("C:")
+    );
+    assert_eq!(drive_letter_of(r"d:\docker").as_deref(), Some("D:"));
+    assert_eq!(
+        drive_letter_of("/var/lib/docker"),
+        None,
+        "WSL-style roots have no drive letter and must fall back to all fixed drives"
+    );
+    assert_eq!(
+        drive_letter_of("C:").as_deref(),
+        Some("C:"),
+        "a bare drive still maps to its volume"
+    );
+}

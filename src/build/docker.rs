@@ -121,6 +121,272 @@ pub fn print_docker_install_guide() {
     }
 }
 
+// ============================================================
+// System Diagnostics: BuildKit & Docker Storage
+// (shared by CLI `check` and the GUI System tab)
+// ============================================================
+
+/// Result of probing the Docker BuildKit (buildx) plugin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildKitStatus {
+    /// `docker buildx version` answered; carries the trimmed stdout
+    /// (a single line like `github.com/docker/buildx v0.17.1 ...`).
+    Available { version: String },
+    /// buildx missing, `docker` spawn failed, or the command failed.
+    NotDetected,
+}
+
+/// Probe `docker buildx version` — the same command the CLI check's
+/// BuildKit section runs. Every failure degrades to
+/// [`BuildKitStatus::NotDetected`] (the caller renders guidance either
+/// way); this never panics.
+pub fn check_buildkit() -> BuildKitStatus {
+    let output = Command::new("docker").args(["buildx", "version"]).output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if version.is_empty() {
+                BuildKitStatus::NotDetected
+            } else {
+                BuildKitStatus::Available { version }
+            }
+        }
+        _ => BuildKitStatus::NotDetected,
+    }
+}
+
+/// One probed volume/filesystem entry of a disk-space check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskEntry {
+    /// Drive letter (`C:`) on Windows, device path (`/dev/sda1`) on Unix.
+    pub volume: String,
+    /// Human-readable total size ("118.0 GB"); empty when not reported.
+    pub total: String,
+    /// Human-readable used space; empty when not reported.
+    pub used: String,
+    /// Human-readable free space.
+    pub free: String,
+}
+
+impl DiskEntry {
+    /// The check-style summary line, e.g.
+    /// `Available: 42.3 GB (used: 75.7 GB of 118.0 GB)`; without totals
+    /// it degrades to `Available: <free>`.
+    pub fn summary(&self) -> String {
+        if self.used.is_empty() || self.total.is_empty() {
+            format!("Available: {}", self.free)
+        } else {
+            format!(
+                "Available: {} (used: {} of {})",
+                self.free, self.used, self.total
+            )
+        }
+    }
+}
+
+/// Outcome of the disk-space probe that accompanies `DockerRootDir`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiskSpaceStatus {
+    /// At least one volume was probed successfully.
+    Ok(Vec<DiskEntry>),
+    /// The probe could not run or produced nothing parsable; carries a
+    /// human-readable reason for display.
+    Unknown(String),
+}
+
+/// Storage facts of the local Docker daemon: its root directory plus the
+/// disk-space verdict for the volume hosting it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerStorageStatus {
+    /// `docker info --format {{.DockerRootDir}}`; `None` when the daemon
+    /// is unreachable. The disk probe then falls back to every fixed
+    /// volume (Windows) or degrades to `Unknown` (Unix, nothing to stat).
+    pub root_dir: Option<String>,
+    pub disk: DiskSpaceStatus,
+}
+
+/// Inspect Docker's storage location and the free disk space behind it.
+/// Shared by CLI `check` and the GUI System tab. Never panics: every
+/// spawn/parse failure degrades to a [`DiskSpaceStatus::Unknown`] reason.
+pub fn check_docker_storage() -> DockerStorageStatus {
+    let root_dir = Command::new("docker")
+        .args(["info", "--format", "{{.DockerRootDir}}"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|root| !root.is_empty());
+
+    let disk = probe_disk_space(root_dir.as_deref());
+    DockerStorageStatus { root_dir, disk }
+}
+
+/// Disk-space probe behind [`check_docker_storage`], split out so the
+/// fallback behavior for a missing/unusable root dir stays reviewable and
+/// testable.
+fn probe_disk_space(root_dir: Option<&str>) -> DiskSpaceStatus {
+    #[cfg(target_os = "windows")]
+    {
+        // `wmic logicaldisk` is gone on Windows 11 24H2+ (build 26100+):
+        // probe via PowerShell CIM instead (same `powershell -NoProfile`
+        // precedent as registry.rs's mirror probe). Prefer the volume that
+        // hosts root_dir; fall back to every fixed drive (DriveType=3) —
+        // Docker Desktop's WSL backend reports a `/var/lib/docker` root
+        // with no drive letter, which must still show something.
+        let filter = match root_dir.and_then(drive_letter_of) {
+            Some(drive) => format!("DeviceID='{}'", drive),
+            None => "DriveType=3".to_string(),
+        };
+        let script = format!(
+            "Get-CimInstance Win32_LogicalDisk -Filter \"{}\" | \
+             ForEach-Object {{ \"$($_.DeviceID)|$($_.Size)|$($_.FreeSpace)\" }}",
+            filter
+        );
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let entries = parse_cim_disk_lines(&String::from_utf8_lossy(&out.stdout));
+                if entries.is_empty() {
+                    DiskSpaceStatus::Unknown(
+                        "PowerShell Get-CimInstance returned no fixed-drive space".into(),
+                    )
+                } else {
+                    DiskSpaceStatus::Ok(entries)
+                }
+            }
+            Ok(out) => DiskSpaceStatus::Unknown(format!(
+                "PowerShell probe failed (exit {:?}): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+            Err(e) => DiskSpaceStatus::Unknown(format!("Could not run PowerShell: {}", e)),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let Some(root) = root_dir else {
+            return DiskSpaceStatus::Unknown(
+                "Docker root directory unknown (daemon not reachable); cannot check disk space"
+                    .into(),
+            );
+        };
+        let output = Command::new("df").args(["-h", root]).output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let entries = parse_df_output(&String::from_utf8_lossy(&out.stdout));
+                if entries.is_empty() {
+                    DiskSpaceStatus::Unknown(format!("df -h {} produced no parsable output", root))
+                } else {
+                    DiskSpaceStatus::Ok(entries)
+                }
+            }
+            Ok(out) => DiskSpaceStatus::Unknown(format!(
+                "df -h {} failed (exit {:?}): {}",
+                root,
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            )),
+            Err(e) => DiskSpaceStatus::Unknown(format!("Could not run df: {}", e)),
+        }
+    }
+}
+
+/// Extract the drive (`C:`) from a Windows-style root path. `None` for
+/// anything else — including WSL-style `/var/lib/docker` roots.
+#[cfg(target_os = "windows")]
+pub(crate) fn drive_letter_of(root: &str) -> Option<String> {
+    let bytes = root.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        Some(root[..2].to_ascii_uppercase())
+    } else {
+        None
+    }
+}
+
+/// Parse the `DeviceID|Size|FreeSpace` lines the Windows CIM probe emits
+/// (e.g. `C:|999871418368|326829953024`). Blank rows and rows without a
+/// parsable free-space value are skipped; a missing/invalid size degrades
+/// that entry's total/used to empty.
+// Pure string parser that also runs on non-Windows (test support), where
+// the CIM probe branch is compiled out.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn parse_cim_disk_lines(stdout: &str) -> Vec<DiskEntry> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let mut parts = line.splitn(3, '|');
+            let volume = parts.next()?.trim().to_string();
+            let size = parts.next()?.trim();
+            let free = parts.next()?.trim();
+            if volume.is_empty() {
+                return None;
+            }
+            let free_bytes: u64 = free.parse().ok()?;
+            let (total, used) = match size.parse::<u64>() {
+                Ok(size_bytes) if size_bytes >= free_bytes => (
+                    format_bytes(size_bytes),
+                    format_bytes(size_bytes - free_bytes),
+                ),
+                _ => (String::new(), String::new()),
+            };
+            Some(DiskEntry {
+                volume,
+                total,
+                used,
+                free: format_bytes(free_bytes),
+            })
+        })
+        .collect()
+}
+
+/// Parse `df -h` output into entries (skips the header line). Column
+/// order mirrors the CLI check's original inline parsing:
+/// Filesystem / Size / Used / Avail.
+// Pure string parser that also runs on Windows (test support), where the
+// `df` probe branch is compiled out.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(crate) fn parse_df_output(stdout: &str) -> Vec<DiskEntry> {
+    stdout
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 4 {
+                return None;
+            }
+            Some(DiskEntry {
+                volume: parts[0].to_string(),
+                total: parts[1].to_string(),
+                used: parts[2].to_string(),
+                free: parts[3].to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Format a byte count as a compact human-readable size ("42.3 GB").
+pub(crate) fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 pub fn restart_docker() -> Result<()> {
     #[cfg(target_os = "windows")]
     {

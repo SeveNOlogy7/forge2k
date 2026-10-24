@@ -32,6 +32,29 @@ struct DockerfilePreview {
     synthesized: bool,
 }
 
+/// Shared state of one System-tab probe (BuildKit / Docker storage): the
+/// last result (`None` = never checked) and whether a probe is currently
+/// running on its worker thread. The probes spawn `docker buildx version`,
+/// `docker info` and PowerShell/`df` subprocesses that can take seconds —
+/// they must never run on the UI thread (same reason `start_build` uses a
+/// worker thread).
+#[derive(Clone)]
+struct ProbeState<T> {
+    result: Option<T>,
+    running: bool,
+}
+
+// Manual impl: the derive would require T: Default, but the default state
+// is `None`/`false` regardless of the payload type.
+impl<T> Default for ProbeState<T> {
+    fn default() -> Self {
+        Self {
+            result: None,
+            running: false,
+        }
+    }
+}
+
 // ============================================================
 // Application State
 // ============================================================
@@ -83,6 +106,11 @@ pub struct Forge2kApp {
     registry_status: String,
     current_mirror: String,
 
+    // System-tab probes (BuildKit / Docker storage), shared with worker
+    // threads via Arc<Mutex> exactly like the build state above.
+    buildkit_probe: Arc<Mutex<ProbeState<build::BuildKitStatus>>>,
+    storage_probe: Arc<Mutex<ProbeState<build::DockerStorageStatus>>>,
+
     // Version list cache: one disk scan at startup or via the explicit
     // Refresh button — the frame loop never rescans dockerfiles/.
     configs_cache: Vec<build::ConfigInfo>,
@@ -133,6 +161,8 @@ impl Default for Forge2kApp {
             docker_checked: false,
             registry_status: "Not checked".into(),
             current_mirror,
+            buildkit_probe: Arc::new(Mutex::new(ProbeState::default())),
+            storage_probe: Arc::new(Mutex::new(ProbeState::default())),
             configs_cache: build::list_available_configs(),
             mirror_input: settings.mirror_input,
             settings_message: String::new(),
@@ -437,6 +467,31 @@ impl Forge2kApp {
         }
     }
 
+    /// Launch `probe` on a worker thread and store its result in
+    /// `probe_state` when done. A no-op while that probe is already
+    /// running, so double-clicks and repaint races are absorbed; the UI
+    /// thread only ever touches the mutex, never the subprocesses.
+    fn run_probe<T, F>(&self, probe_state: &Arc<Mutex<ProbeState<T>>>, probe: F)
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        {
+            let mut state = probe_state.lock().unwrap_or_else(PoisonError::into_inner);
+            if state.running {
+                return;
+            }
+            state.running = true;
+        }
+        let shared = Arc::clone(probe_state);
+        std::thread::spawn(move || {
+            let result = probe();
+            let mut state = shared.lock().unwrap_or_else(PoisonError::into_inner);
+            state.result = Some(result);
+            state.running = false;
+        });
+    }
+
     /// Persist the current settings to `<home>/.forge2k/settings.json`.
     ///
     /// Called only from user-commit points in the Settings tab (edit
@@ -461,11 +516,24 @@ impl Forge2kApp {
 
 impl eframe::App for Forge2kApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Keep repainting during build
+        // Keep repainting during build and while System-tab probes run on
+        // their worker threads (buildx/PowerShell/df can take seconds).
+        let probes_running = {
+            let buildkit = self
+                .buildkit_probe
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let storage = self
+                .storage_probe
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            buildkit.running || storage.running
+        };
         if *self
             .is_building
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+            || probes_running
         {
             ctx.request_repaint();
         }
@@ -1275,6 +1343,105 @@ impl Forge2kApp {
 
             ui.add_space(16.0);
 
+            // BuildKit (buildx) Card — CLI check parity (`docker buildx version`)
+            ui.heading(
+                RichText::new("🧱 Docker BuildKit")
+                    .size(16.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
+            ui.add_space(6.0);
+
+            let buildkit_card = egui::Frame::group(ui.style())
+                .fill(Color32::from_rgb(28, 28, 38))
+                .corner_radius(8.0);
+            buildkit_card.show(ui, |ui| {
+                // Snapshot under a short lock; the worker thread keeps
+                // writing the original behind the mutex.
+                let snap = self
+                    .buildkit_probe
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                let (dot, dot_color, state_label) = if snap.running {
+                    (
+                        "●",
+                        Color32::from_rgb(255, 200, 50),
+                        RichText::new("Checking…").strong(),
+                    )
+                } else {
+                    match &snap.result {
+                        Some(build::BuildKitStatus::Available { .. }) => (
+                            "●",
+                            Color32::from_rgb(80, 220, 100),
+                            RichText::new("Installed").color(Color32::from_rgb(80, 220, 100)).strong(),
+                        ),
+                        Some(build::BuildKitStatus::NotDetected) => (
+                            "●",
+                            Color32::from_rgb(220, 80, 80),
+                            RichText::new("Not detected").color(Color32::from_rgb(220, 80, 80)).strong(),
+                        ),
+                        None => (
+                            "○",
+                            Color32::from_rgb(120, 120, 140),
+                            RichText::new("Not checked"),
+                        ),
+                    }
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(dot).color(dot_color).size(20.0));
+                    ui.label(state_label);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn_label = if snap.running {
+                            "Checking…"
+                        } else {
+                            "Check BuildKit"
+                        };
+                        if ui
+                            .add_enabled(!snap.running, egui::Button::new(btn_label))
+                            .clicked()
+                        {
+                            self.run_probe(&self.buildkit_probe, build::check_buildkit);
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                match &snap.result {
+                    Some(build::BuildKitStatus::Available { version }) => {
+                        ui.label(format!("Version: {}", version));
+                    }
+                    Some(build::BuildKitStatus::NotDetected) => {
+                        ui.label(
+                            RichText::new(
+                                "BuildKit (buildx) not detected — builds fall back to the legacy builder.",
+                            )
+                            .size(12.0)
+                            .color(Color32::from_rgb(255, 200, 80)),
+                        );
+                        ui.label(
+                            RichText::new(
+                                "Docker Desktop ships buildx by default. On Linux, install the plugin:",
+                            )
+                            .size(11.0)
+                            .color(Color32::from_rgb(150, 150, 170)),
+                        );
+                        ui.label(
+                            RichText::new("  sudo apt-get install docker-buildx-plugin")
+                                .size(11.0)
+                                .family(egui::FontFamily::Monospace),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new("Click \"Check BuildKit\" to probe the buildx plugin.")
+                                .size(12.0)
+                                .color(Color32::from_rgb(150, 150, 170)),
+                        );
+                    }
+                }
+            });
+
+            ui.add_space(16.0);
+
             // Registry Status Card
             ui.heading(
                 RichText::new("🌐 Docker Registry")
@@ -1301,6 +1468,118 @@ impl Forge2kApp {
                         RichText::new(format!("Mirror: {}", self.current_mirror))
                             .color(Color32::from_rgb(100, 180, 255)),
                     );
+                }
+            });
+
+            ui.add_space(16.0);
+
+            // Docker Storage Card — CLI check parity (root dir + disk free),
+            // probing through the same shared function as `forge2k check`.
+            ui.heading(
+                RichText::new("💾 Docker Storage")
+                    .size(16.0)
+                    .color(Color32::from_rgb(255, 200, 50)),
+            );
+            ui.add_space(6.0);
+
+            let storage_card = egui::Frame::group(ui.style())
+                .fill(Color32::from_rgb(28, 28, 38))
+                .corner_radius(8.0);
+            storage_card.show(ui, |ui| {
+                let snap = self
+                    .storage_probe
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .clone();
+                let (dot, dot_color, state_label) = if snap.running {
+                    (
+                        "●",
+                        Color32::from_rgb(255, 200, 50),
+                        RichText::new("Checking…").strong(),
+                    )
+                } else {
+                    match &snap.result {
+                        Some(build::DockerStorageStatus {
+                            disk: build::DiskSpaceStatus::Ok(_),
+                            ..
+                        }) => (
+                            "●",
+                            Color32::from_rgb(80, 220, 100),
+                            RichText::new("Checked").color(Color32::from_rgb(80, 220, 100)).strong(),
+                        ),
+                        Some(build::DockerStorageStatus {
+                            disk: build::DiskSpaceStatus::Unknown(_),
+                            ..
+                        }) => (
+                            "●",
+                            Color32::from_rgb(255, 200, 50),
+                            RichText::new("Unknown").color(Color32::from_rgb(255, 200, 50)).strong(),
+                        ),
+                        None => (
+                            "○",
+                            Color32::from_rgb(120, 120, 140),
+                            RichText::new("Not checked"),
+                        ),
+                    }
+                };
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(dot).color(dot_color).size(20.0));
+                    ui.label(state_label);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn_label = if snap.running {
+                            "Checking…"
+                        } else {
+                            "Check Storage"
+                        };
+                        if ui
+                            .add_enabled(!snap.running, egui::Button::new(btn_label))
+                            .clicked()
+                        {
+                            self.run_probe(&self.storage_probe, build::check_docker_storage);
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                match &snap.result {
+                    Some(status) => {
+                        match &status.root_dir {
+                            Some(root) => {
+                                ui.label(format!("Root directory: {}", root));
+                            }
+                            None => {
+                                ui.label(
+                                    RichText::new(
+                                        "Root directory: unknown (Docker daemon not reachable)",
+                                    )
+                                    .size(12.0)
+                                    .color(Color32::from_rgb(255, 200, 80)),
+                                );
+                            }
+                        }
+                        match &status.disk {
+                            build::DiskSpaceStatus::Ok(entries) => {
+                                for entry in entries {
+                                    ui.label(format!("{} {}", entry.volume, entry.summary()));
+                                }
+                            }
+                            build::DiskSpaceStatus::Unknown(reason) => {
+                                ui.label(
+                                    RichText::new(format!("Disk space unknown: {}", reason))
+                                        .size(12.0)
+                                        .color(Color32::from_rgb(255, 200, 80)),
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(
+                                "Click \"Check Storage\" to probe the Docker root directory and free disk space.",
+                            )
+                            .size(12.0)
+                            .color(Color32::from_rgb(150, 150, 170)),
+                        );
+                    }
                 }
             });
 
