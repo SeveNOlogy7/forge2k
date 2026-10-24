@@ -4,6 +4,29 @@
 
 ## [Unreleased]
 
+### Added（第八期 UI/CLI 覆盖率补齐 + 文档）
+
+- **GUI Build Tab 高级选项区（CLI build 选项全覆盖）**：新增 `--features` 预设勾选（由 `KNOWN_FEATURES` 注册表驱动，当前=deepmd，按 `features_supported_arm(method, version)` 联动禁用/启用，spack / master 等不合法组合即时置灰并显示原因）、`--no-cache` 勾选、自定义 Dockerfile 文本输入（失焦校验路径存在）与 `--force`（跳过 Docker 运行检查）勾选；features 与自定义 Dockerfile 互斥，同启即时提示；状态→`BuildConfig` 映射抽为无 ui 参数纯函数 `collect_build_config`（供单测）；`no_cache` / `force` / `features` / `dockerfile` 四字段持久化到 `~/.forge2k/settings.json`（全部 `#[serde(default)]`，旧版设置文件静默降级默认值，向后兼容）
+- **Generate Only Dockerfile 预览**：Build Tab 新增 "Generate Only" 按钮，复用 resolve_dockerfile / generate.rs 合成路径，GUI 内滚动文本面板展示 Dockerfile 全文与保存路径（副作用仅写 `%TEMP%/forge2k/`），不启动构建——CLI `--generate-only` 的 GUI 等价入口
+- **Configs 预置配置浏览 Tab（CLI `list` 等价）**：列出全部捆绑与 synthesized 配置（含 Specs 摘要），带 method / version 过滤下拉（对应 `list --method` / `list --version`）；每条配置附等效 `forge2k build` 命令一键复制，命令拼装收敛为共享函数 `cli_build_command`（CLI list 输出与 GUI 单一来源）
+- **System Tab 补齐 check 覆盖**：新增 BuildKit 检测卡片（`docker buildx version`，`check_buildkit`）与 Docker 存储位置/磁盘剩余检测卡片（`check_docker_storage`）
+- **Settings Tab 新增 Restart Docker 按钮**：Windows 后台线程执行 `restart_docker`（内部 3s sleep + 最长 60s 轮询，不经 UI 线程调用避免冻结界面）；非 Windows 不直接执行（GUI 进程无 tty 输 sudo 密码必败），改为显示等价手动命令指引；构建进行中按钮禁用
+- **GUI 测试 +12**：`advanced_options_tests` 覆盖 `collect_build_config` 状态映射（features / no-cache / dockerfile / force 传递与互斥、联动规则）、构建 blocker 判定、generate-only 内核路径、PowerShell CIM / df 输出解析，并对 native CPU 白名单与 stale mpi/cpu 回退做回归 pin
+- **LICENSE**：补 MIT 许可证文本（与 Cargo.toml 声明一致）
+
+### Fixed（第八期）
+
+- **CLI check 幽灵引用**：Registry 检测项的建议动作 `forge2k mirror --detect` 指向不存在的选项，改为真实用法 `forge2k mirror`（自动探测即省略 url 时的默认行为）
+- **CLI long_about GitHub 链接**：`forge2k --help` 的项目链接误指向上游 cp2k/cp2k-containers，改为本项目 SeveNOlogy7/forge2k
+- **`mirror -r --restart` 组合静默忽略**：remove 分支提前 return 使 `--restart` 被丢弃——改为 remove 完成后继续执行 Docker 重启，组合语义生效（先移除配置、再重启）
+- **wmic 移除导致的磁盘探测失效**：磁盘检测原用 `wmic logicaldisk`，wmic 在 Windows 11 24H2+ 已移除，CLI check 磁盘项在新系统必然空输出——Windows 分支改用 PowerShell `Get-CimInstance Win32_LogicalDisk`（抽为共享函数，CLI check 与 GUI System Tab 同源，保留 Unix `df -h` 分支），解析函数入单测
+- **GUI native CPU 下拉越出 Step 0 白名单**：下拉集合收窄为 `{x86_64, generic}`，与 `validate_native_config`（build/execute.rs）校验同源，不再提供会被构建层直接拒绝的 CPU 目标
+- **GUI 构建方法切换后 stale 值残留**：method 切换使 mpi / cpu 越出当前合法集合时自动回退（如 spack→toolchain 时 openmpi 回退 mpich、越界 CPU 回退 generic），残留值不再泄漏进构建配置
+
+### Documented（第八期）
+
+- README 对齐：选项表补 `--generate-only`；新增 mirror 子命令节（url / `-r` / `--restart` 逐项语义与组合语义、`registry-mirrors` 被覆盖为单元素数组的行为说明）；新增 check 子命令节（五项检测表，含 PowerShell CIM 磁盘探测）；新增退出码与取消节（成功 0 / 失败 1 / 取消 130，取消词 `q` / `quit` / 回车，两类温和退出仍为 0）；`--version` / `--cpu` 自由字符串（拼错在合成 / clone 阶段才失败）与 GUI 下拉刻意收窄为已知配置的说明；GUI 五 Tab（Build / Configs / System / Settings / About）逐卡概览
+
 ### Added（第七期 CP2K 2026.2）
 
 - **CP2K 2026.2 toolchain 支持**：版本注册 2026.2（toolchain 合成两条：generic none / generic P100，psmp 变体；CLI 默认版本仍为 2026.1）；release 构建新增 **release-cmake 臂**——上游 ≥2026.1 已删除根 Makefile，走 `cmake -GNinja` 构建（EVERYTHING=ON + DLAF/PEXSI/DEEPMD/LIBTORCH OFF 共用基础旗标集）；CUDA 侧新增 cmake 三旗标（`-DCP2K_USE_ACCEL=CUDA -DCP2K_WITH_GPU=<GPU> -DCMAKE_CUDA_ARCHITECTURES=<sm>`，P100→60 / V100→70），P100/V100 变体对 2026.2 可用
