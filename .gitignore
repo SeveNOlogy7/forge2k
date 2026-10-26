@@ -29,3 +29,7 @@ run_native.cmd
 
 # ULW per-session runtime state
 .omz/
+
+# Local assistant tool runtime state
+.mimosa/
+.zcode/
