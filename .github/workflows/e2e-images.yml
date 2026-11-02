@@ -25,6 +25,7 @@ on:
           - cuda_P100
           - cuda_V100
           - spack_2025.2_x86_64
+          - spack_2026.2_x86_64
           - native_2023.2_x86_64_none
           - native_2023.2_generic_none
           - toolchain_2026.2_generic
@@ -50,8 +51,14 @@ jobs:
     # (wave-3 plan default 5). The deepmd feature variant (wave
     # feature-presets) holds the same arithmetic as toolchain_2026.2_generic:
     # the release-cmake arm only flips two cmake flags, adding no new build
-    # stage. All stay under the 6h (360 min) GitHub hard cap.
-    timeout-minutes: ${{ (inputs.variant == 'spack_2025.2_x86_64' || inputs.variant == 'toolchain_2026.2_generic' || inputs.variant == 'cuda_2026.2_P100' || inputs.variant == 'toolchain_2026.2_generic_deepmd' || startsWith(inputs.variant, 'native_')) && 350 || 330 }}
+    # stage. The spack 2026.2 variant (wave 2) runs the same cold spack
+    # dependency compile as spack_2025.2 (upstream make_cp2k.sh builds the
+    # full dep stack), so it shares the 350/340 spack arithmetic — with no
+    # buildcache wiring (plan default: the transport ring's key binds
+    # dockerfiles/spack/**, meaningless for a synthesized Dockerfile; the
+    # variant accepts the cold build). All stay under the 6h (360 min)
+    # GitHub hard cap.
+    timeout-minutes: ${{ (inputs.variant == 'spack_2025.2_x86_64' || inputs.variant == 'spack_2026.2_x86_64' || inputs.variant == 'toolchain_2026.2_generic' || inputs.variant == 'cuda_2026.2_P100' || inputs.variant == 'toolchain_2026.2_generic_deepmd' || startsWith(inputs.variant, 'native_')) && 350 || 330 }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -61,7 +68,7 @@ jobs:
           VARIANT: ${{ inputs.variant }}
         run: |
           case "$VARIANT" in
-            cuda_P100|cuda_V100|spack_2025.2_x86_64|native_2023.2_x86_64_none|native_2023.2_generic_none|toolchain_2026.2_generic|cuda_2026.2_P100|toolchain_2026.2_generic_deepmd) echo "variant ok: $VARIANT" ;;
+            cuda_P100|cuda_V100|spack_2025.2_x86_64|spack_2026.2_x86_64|native_2023.2_x86_64_none|native_2023.2_generic_none|toolchain_2026.2_generic|cuda_2026.2_P100|toolchain_2026.2_generic_deepmd) echo "variant ok: $VARIANT" ;;
             *) echo "unknown variant: $VARIANT" >&2; exit 1 ;;
           esac
 
@@ -228,6 +235,22 @@ jobs:
           set -o pipefail
           ./target/debug/forge2k build -m spack -v 2025.2 --cpu x86_64 2>&1 | tee build-log.txt
 
+      # --- spack 2026.2 make_cp2k.sh variant (wave 2) ----------------------
+      # Upstream rearranged tools/spack in v2026.2, so forge2k synthesizes
+      # this image through the new make_cp2k.sh delegation arm (template
+      # spack-makecp2k.Dockerfile.tmpl): single delegated build, runtime
+      # copies the spack opt tree + install tree + loader conf. Cold build
+      # only — deliberately NOT wired into the buildcache transport ring
+      # below (its key binds dockerfiles/spack/**, meaningless for a
+      # synthesized Dockerfile; plan default accepts the hour-scale cold
+      # build). Step cap 340 mirrors the spack_2025.2 arithmetic.
+      - name: forge2k build -m spack -v 2026.2 --cpu x86_64
+        if: inputs.variant == 'spack_2026.2_x86_64'
+        timeout-minutes: 340
+        run: |
+          set -o pipefail
+          ./target/debug/forge2k build -m spack -v 2026.2 --cpu x86_64 2>&1 | tee build-log.txt
+
       # --- 2026.2 toolchain-cmake variants (wave 3) ------------------------
       # CP2K 2026.2 has no root Makefile upstream, so forge2k synthesizes the
       # 2026.2 Dockerfiles through the cmake arm (wave 2: toolchain_uses_cmake
@@ -287,6 +310,19 @@ jobs:
           echo "=== smoke begin: docker run --rm cp2k/cp2k:2025.2_mpich_x86_64_psmp cp2k --version ==="
           docker run --rm cp2k/cp2k:2025.2_mpich_x86_64_psmp cp2k --version
           echo "=== smoke end: spack image has no GPU dependency, this step is a hard acceptance gate ==="
+
+      # 2026.2 spack smoke: same hard-gate shape plus a version grep — an
+      # image that builds but reports the wrong version must fail here, not
+      # pass on a generic "CP2K" string (wave 2 acceptance: container-level
+      # cp2k --version must contain the 2026.2 marker).
+      - name: smoke test docker run cp2k --version (spack 2026.2 variant; hard gate)
+        if: inputs.variant == 'spack_2026.2_x86_64'
+        run: |
+          set -o pipefail
+          echo "=== smoke begin: docker run --rm cp2k/cp2k:2026.2_mpich_x86_64_psmp cp2k --version ==="
+          docker run --rm cp2k/cp2k:2026.2_mpich_x86_64_psmp cp2k --version | tee cp2k-version.txt
+          grep -q 'CP2K version 2026.2' cp2k-version.txt
+          echo "=== smoke end: version grep passed (hard acceptance gate) ==="
 
       - name: smoke test docker run cp2k --version (2026.2 CPU variant; hard gate)
         if: inputs.variant == 'toolchain_2026.2_generic'

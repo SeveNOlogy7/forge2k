@@ -418,6 +418,138 @@ fn t13_spack_dockerfile_synthesized_key_fields() {
 }
 
 #[test]
+fn t_w2_spack_2026_2_delegates_to_make_cp2k() {
+    // The make_cp2k.sh arm: single delegated invocation, upstream checkout
+    // pin, no tools/spack internal path, upstream runtime copy pattern.
+    let c = base_config("spack", "2026.2", "mpich", "x86_64", "none", "psmp");
+    let content = generate_dockerfile_content(&c).expect("render make_cp2k arm");
+    assert!(
+        content.contains("./make_cp2k.sh -cv psmp -mpi mpich -gm none"),
+        "T-W2: the build must delegate with the mapped -cv/-mpi/-gm flags"
+    );
+    assert!(
+        content.contains("REF=support/v2026.2;"),
+        "T-W2: the clone must pin the support/v2026.2 ref (2026.2 checkout marker)"
+    );
+    // Invariant: no Dockerfile *instruction* may touch tools/spack internals
+    // (upstream rearranged that folder in v2026.2); comments may name the
+    // rearrangement, instructions may not.
+    let instruction_lines: Vec<&str> = content
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            t.starts_with("RUN")
+                || t.starts_with("COPY")
+                || t.starts_with("ADD")
+                || t.starts_with("ENV")
+                || t.starts_with("ARG")
+                || t.starts_with("WORKDIR")
+                || t.starts_with("ENTRYPOINT")
+        })
+        .collect();
+    assert!(
+        instruction_lines
+            .iter()
+            .all(|l| !l.contains("tools/spack") && !l.contains("cp2k_dev_repo")),
+        "T-W2: no RUN/COPY/ENV/ARG/WORKDIR instruction may reference tools/spack internals, offending lines:\n{}",
+        instruction_lines
+            .iter()
+            .filter(|l| l.contains("tools/spack") || l.contains("cp2k_dev_repo"))
+            .copied()
+            .collect::<Vec<&str>>()
+            .join("\n")
+    );
+    assert!(
+        content.contains("COPY --from=build_cp2k /opt/cp2k/spack/spack/opt/spack ./spack/spack/opt/spack")
+            && content.contains("COPY --from=build_cp2k /opt/cp2k/install ./install")
+            && content.contains("COPY --from=build_cp2k /etc/ld.so.conf.d/cp2k.conf /etc/ld.so.conf.d/cp2k.conf")
+            && content.contains("RUN ldconfig"),
+        "T-W2: runtime must copy the spack opt tree + install tree + loader conf and run ldconfig (upstream install-stage pattern)"
+    );
+    assert!(
+        content.contains("ENTRYPOINT [\"/opt/cp2k/install/bin/launch\"]"),
+        "T-W2: entrypoint must be the upstream launch wrapper"
+    );
+    assert!(
+        !content.contains("{{"),
+        "T-W2: no template placeholder may survive rendering"
+    );
+}
+
+#[test]
+fn t_w2_spack_master_takes_make_cp2k_arm_too() {
+    // master shares the v2026.2 tools/spack layout and the repo-root
+    // make_cp2k.sh (verified on both refs), so it rides the same arm —
+    // rendering the legacy arm for master would reference the removed
+    // cp2k_dev_repo path against today's upstream.
+    let c = base_config("spack", "master", "mpich", "x86_64", "none", "psmp");
+    let content = generate_dockerfile_content(&c).expect("render master make_cp2k arm");
+    assert!(
+        content.contains("./make_cp2k.sh -cv psmp -mpi mpich -gm none"),
+        "T-W2: master must delegate to make_cp2k.sh as well"
+    );
+    assert!(
+        content.contains("REF=master;"),
+        "T-W2: master clone must pin REF=master"
+    );
+    assert!(
+        !content
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                t.starts_with("RUN")
+                    || t.starts_with("COPY")
+                    || t.starts_with("ADD")
+                    || t.starts_with("ENV")
+                    || t.starts_with("ARG")
+                    || t.starts_with("WORKDIR")
+                    || t.starts_with("ENTRYPOINT")
+            })
+            .any(|l| l.contains("tools/spack") || l.contains("cp2k_dev_repo")),
+        "T-W2: master must not carry any instruction referencing tools/spack internals"
+    );
+}
+
+#[test]
+fn t_w2_spack_2026_1_stays_on_legacy_arm() {
+    // Boundary regression: 2026.1 keeps the legacy hand-rolled scaffolding
+    // byte-for-byte (the arm split must not disturb <= 2026.1 renders).
+    let c = base_config("spack", "2026.1", "mpich", "x86_64", "none", "psmp");
+    let content = generate_dockerfile_content(&c).expect("render legacy arm");
+    assert!(
+        content.contains("cp2k_dev_repo"),
+        "T-W2: 2026.1 must keep the legacy arm"
+    );
+    assert!(
+        !content.contains("make_cp2k.sh -cv"),
+        "T-W2: 2026.1 must not take the make_cp2k.sh arm"
+    );
+}
+
+#[test]
+fn t_w2_spack_2026_2_registered_as_single_verified_combo() {
+    let configs = crate::build::catalog::list_available_configs();
+    let entries: Vec<_> = configs
+        .iter()
+        .filter(|c| c.method == "spack" && c.version == "2026.2")
+        .collect();
+    assert_eq!(
+        entries.len(),
+        1,
+        "T-W2: spack 2026.2 must be advertised as exactly the one verified combo"
+    );
+    let e = entries[0];
+    assert!(
+        e.mpi == "mpich" && e.cpu == "x86_64" && e.cuda == "none" && e.variant == "psmp",
+        "T-W2: the registered combo must be mpich/x86_64/none/psmp, got {}/{}/{}/{}",
+        e.mpi,
+        e.cpu,
+        e.cuda,
+        e.variant
+    );
+}
+
+#[test]
 fn t13_toolchain_dockerfile_synthesized_key_fields() {
     let c = base_config("toolchain", "2023.2", "mpich", "generic", "none", "psmp");
     let content = generate_dockerfile_content(&c).expect("render toolchain template");
@@ -716,11 +848,14 @@ fn t_c13_bundled_toolchain_dockerfiles_cache_mount_fields() {
 
 #[test]
 fn t_c14_spack_synthesized_cache_mount_fields() {
-    // (version, mpi, cpu): pre-2026 release, 2026.x release, master.
-    let cases: [(&str, &str, &str); 3] = [
+    // (version, mpi, cpu): pre-2026 release and 2026.x release. Master used
+    // to ride this legacy arm too, but wave 2 moved it (with >= 2026.2) to
+    // the make_cp2k.sh delegation arm — see t_w2_spack_master_takes_make_cp2k_arm_too
+    // for its coverage; the invariants below describe the legacy
+    // scaffolding only.
+    let cases: [(&str, &str, &str); 2] = [
         ("2025.2", "mpich", "x86_64"),
         ("2026.1", "openmpi", "cascadelake"),
-        ("master", "mpich", "x86_64"),
     ];
     let apt_spec = "--mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked";
     let spack_src_spec =
@@ -1883,11 +2018,12 @@ fn t26_2026_2_resolve_dockerfile_synthesizes_cmake_file() {
 }
 
 /// (v) catalog: the synthesized table must advertise exactly the two
-/// toolchain 2026.2 entries as Synthesized; spack 2026.2 must NOT be
-/// advertised (upstream tools/spack reshuffle; delegating to
-/// make_cp2k.sh is backlog only).
+/// toolchain 2026.2 entries as Synthesized. spack 2026.2 used to be
+/// forbidden here (upstream tools/spack reshuffle) — wave 2 lifted that:
+/// it is now registered as its own single verified combo, asserted in
+/// t_w2_spack_2026_2_registered_as_single_verified_combo.
 #[test]
-fn t26_catalog_advertises_2026_2_toolchain_only() {
+fn t26_catalog_advertises_2026_2_toolchain_entries() {
     let configs = list_available_configs();
 
     // both 2026.2 toolchain entries must be advertised as Synthesized;
@@ -1917,13 +2053,6 @@ fn t26_catalog_advertises_2026_2_toolchain_only() {
         missing.is_empty(),
         "T26: list_available_configs must advertise the 2026.2 toolchain entries, missing: {:?}",
         missing
-    );
-
-    assert!(
-        !configs
-            .iter()
-            .any(|c| c.method == "spack" && c.version == "2026.2"),
-        "T26: spack 2026.2 must not be advertised (upstream tools/spack reshuffle)"
     );
 }
 

@@ -181,6 +181,12 @@ pub fn list_available_configs() -> Vec<ConfigInfo> {
         ("spack", "2026.1", "mpich", "x86_64", "none", "psmp"),
         ("spack", "2026.1", "mpich", "cascadelake", "none", "psmp"),
         ("spack", "2026.1", "openmpi", "cascadelake", "none", "psmp"),
+        // spack 2026.2 (make_cp2k.sh delegation arm): registered as the
+        // single combo the e2e variant spack_2026.2_x86_64 actually
+        // verifies — no unverified combination is advertised. The
+        // 3-combo 2026.1 registration above is legacy scope, not a
+        // template to copy.
+        ("spack", "2026.2", "mpich", "x86_64", "none", "psmp"),
         ("toolchain", "master", "mpich", "generic", "none", "psmp"),
         ("toolchain", "2026.2", "mpich", "generic", "none", "psmp"),
         ("toolchain", "2026.2", "mpich", "generic", "P100", "psmp"),
