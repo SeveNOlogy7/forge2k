@@ -1634,6 +1634,62 @@ fn t_o21_native_step0_rejects_gpu_options_consistent_with_empty_matrix() {
 }
 
 // --------------------------------------------------------
+// Wave 1 (native cmake migration): the cmake boundary moved
+// from master-only to `master || version >= 2026.1` (shared
+// with the toolchain arm's toolchain_uses_cmake)
+// --------------------------------------------------------
+//
+// The Step 0 validator encodes the same boundary: CPU combinations must
+// pass for the cmake-arm releases (2026.1/2026.2) exactly like master,
+// every CUDA combination must stay explicitly rejected for them (the
+// cmake arm carries no CUDA flags — silent misbuild beats explicit
+// rejection), and the make-arm boundary is exact (2025.2, the last
+// release shipping root Makefile/arch trees, keeps the full CUDA set).
+
+#[test]
+fn t_native_cmake_boundary_2026_1_plus_cpu_ok_and_cuda_rejected() {
+    for version in ["master", "2026.1", "2026.2"] {
+        assert!(
+            super::execute::validate_native_config(version, "x86_64", "mpich", "psmp", "none")
+                .is_ok(),
+            "W1: {} + cuda='none' must pass Step 0 (cmake arm)",
+            version
+        );
+        assert!(
+            super::execute::validate_native_config(version, "generic", "mpich", "psmp", "none")
+                .is_ok(),
+            "W1: {} + cpu='generic' + cuda='none' must pass Step 0 (cmake arm)",
+            version
+        );
+        for cuda in ["P100", "V100"] {
+            let err =
+                super::execute::validate_native_config(version, "x86_64", "mpich", "psmp", cuda)
+                    .expect_err("W1: cmake-arm version + CUDA must be rejected");
+            assert!(
+                err.contains("Unsupported native build configuration"),
+                "W1: rejection must name the Step 0 validation, got: {}",
+                err
+            );
+            assert!(
+                err.contains(">= 2026.1 additionally require cuda='none'"),
+                "W1: rejection must name the cmake-arm CUDA rule, got: {}",
+                err
+            );
+        }
+    }
+    // Exact make-arm boundary: 2025.2 (last release with root
+    // Makefile/arch trees) keeps the full CUDA set.
+    for cuda in ["none", "P100", "V100"] {
+        assert!(
+            super::execute::validate_native_config("2025.2", "x86_64", "mpich", "psmp", cuda)
+                .is_ok(),
+            "W1: 2025.2 (make arm) + cuda='{}' must stay supported",
+            cuda
+        );
+    }
+}
+
+// --------------------------------------------------------
 // Wave 5 (T-O22): LogLine / LogLevel semantics
 // --------------------------------------------------------
 //
@@ -2079,11 +2135,13 @@ fn t_wave3_master_and_make_arms_render_no_openpmd_off() {
 // --------------------------------------------------------
 //
 // Adversarial review (verdict=confirmed): gui.rs's native version list
-// advertised 2026.2, but the native release arm in execute.rs still builds
-// via `make` (its use_cmake predicate only covers master) and upstream
-// deleted the root Makefile in v2026.1 — every `make` on a 2026.x tree
-// fails. The advertisement surface is dropped; the native cmake migration
-// itself stays backlog (not part of this fix).
+// advertised 2026.2 while the native release arm still built via `make`
+// (its use_cmake predicate only covered master) and upstream deleted the
+// root Makefile in v2026.1 — every `make` on a 2026.x tree fails. The
+// advertisement surface stays dropped until the native cmake migration is
+// e2e-verified: Wave 1 moved the native arm to cmake for `master ||
+// >= 2026.1` (execute.rs), and Wave 3 restores the list only after the
+// native_2026.2 e2e run is green.
 
 #[test]
 fn t_review_native_advertised_versions_exclude_2026_2() {
@@ -2091,7 +2149,7 @@ fn t_review_native_advertised_versions_exclude_2026_2() {
     assert!(
         !vs.iter().any(|v| v == "2026.2"),
         "review followup: native version list must not advertise 2026.2 \
-         (no root Makefile upstream, native release arm is make), got: {:?}",
+         (advertisement returns only after the native cmake e2e run is green), got: {:?}",
         vs
     );
     // The toolchain context keeps its 2026.2 support untouched (this

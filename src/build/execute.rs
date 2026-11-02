@@ -1,3 +1,4 @@
+use super::generate::toolchain_uses_cmake;
 use super::{BuildConfig, BuildOutcome, LogLevel, LogLine};
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
@@ -28,8 +29,9 @@ fn set_executable(_path: &Path) -> Result<()> {
 /// - `"toolchain"`: bundled CUDA variants exist for P100 and V100
 /// - `"native"`: the host build accepts the same CUDA set as the bundled
 ///   toolchain matrix (CUDA produces the `local_cuda` arch, matching the
-///   bundled CUDA Dockerfiles); `master` + CUDA is rejected by Step 0
-///   (the master branch builds via cmake, which carries no CUDA flags)
+///   bundled CUDA Dockerfiles) for the make arm; `master` and every
+///   release >= 2026.1 + CUDA is rejected by Step 0 (those branches build
+///   via the cmake arm, which carries no CUDA flags)
 /// - anything unknown: empty set, which the GUI renders as a disabled
 ///   control
 pub fn cuda_options_for_method(method: &str) -> Vec<&'static str> {
@@ -45,9 +47,10 @@ pub fn cuda_options_for_method(method: &str) -> Vec<&'static str> {
 // ============================================================
 
 /// Support-set fragment reused by the Step 0 rejection message: the native
-/// path's 6 supported combinations.
-const NATIVE_SUPPORTED_SET: &str =
-    "cpu in {'generic', 'x86_64'}, mpi='mpich', variant='psmp', cuda in {'none', 'P100', 'V100'}";
+/// path's 6 supported combinations, with the version-dependent CUDA
+/// qualifier (the cmake arm carries no CUDA flags).
+const NATIVE_SUPPORTED_SET: &str = "cpu in {'generic', 'x86_64'}, mpi='mpich', variant='psmp', \
+cuda in {'none', 'P100', 'V100'} (versions master and >= 2026.1 require cuda='none')";
 
 /// Validate a native (host) build configuration against the supported
 /// combination whitelist. Pure: no filesystem/process access, and the
@@ -56,9 +59,11 @@ const NATIVE_SUPPORTED_SET: &str =
 ///
 /// Supported: mpi='mpich' && variant='psmp' && cpu in {'generic','x86_64'}
 /// && cuda in {'none','P100','V100'} (6 combinations) for any release
-/// version. `version='master'` additionally requires cuda='none': the
-/// master branch builds via cmake in this path, which carries no CUDA
-/// flags — an explicit rejection beats a silently misconfigured build.
+/// version on the make arm. Versions that build via the cmake arm
+/// (`master` and every release >= 2026.1 — the same boundary as
+/// [`super::generate::toolchain_uses_cmake`]) additionally require
+/// cuda='none': the cmake arm carries no CUDA flags — an explicit
+/// rejection beats a silently misconfigured build.
 pub fn validate_native_config(
     version: &str,
     cpu: &str,
@@ -70,13 +75,13 @@ pub fn validate_native_config(
         && variant == "psmp"
         && matches!(cpu, "generic" | "x86_64")
         && matches!(cuda, "none" | "P100" | "V100");
-    if combination_supported && !(version == "master" && cuda != "none") {
+    if combination_supported && !(toolchain_uses_cmake(version) && cuda != "none") {
         return Ok(());
     }
     Err(format!(
         "Unsupported native build configuration: version='{}', cpu='{}', mpi='{}', variant='{}', cuda='{}'. \
          The native method supports: {}. \
-         'master' additionally requires cuda='none' (the master branch builds via cmake in this path). \
+         'master' and versions >= 2026.1 additionally require cuda='none' (they build via cmake in this path). \
          Use the Spack (Docker) method for other combinations.",
         version, cpu, mpi, variant, cuda, NATIVE_SUPPORTED_SET
     ))
@@ -562,7 +567,7 @@ pub fn execute_native_build(
         return Err(anyhow::anyhow!(msg));
     }
     log(
-        "✓ Configuration combination supported by native build (6 combinations: cpu generic|x86_64, mpi mpich, variant psmp, cuda none|P100|V100; master requires cuda=none)",
+        "✓ Configuration combination supported by native build (cpu generic|x86_64, mpi mpich, variant psmp, cuda none|P100|V100; master and >= 2026.1 require cuda=none)",
         LogLevel::Info,
     );
     log(&format!("   Version:   {}", config.version), LogLevel::Info);
@@ -760,22 +765,52 @@ pub fn execute_native_build(
     log("📋 Step 5/6: Building CP2K...", LogLevel::Info);
     log("", LogLevel::Info);
 
-    let use_cmake = config.version == "master";
+    let use_cmake = toolchain_uses_cmake(&config.version);
     if use_cmake {
-        // CMake + Ninja (master branch)
+        // CMake + Ninja (master branch and releases >= 2026.1: both deleted
+        // the root Makefile/arch trees upstream — see
+        // [`toolchain_uses_cmake`])
         let setup_script = toolchain_dir.join("install").join("setup");
-        // Create a build script that sources setup then runs cmake+ninja
+        // Create a build script that sources setup then runs cmake+ninja.
+        //
+        // dbcsr version sed: same patch as the toolchain release-cmake arm
+        // (generate.rs release-cmake step, probe run 38393254283) — the
+        // dbcsr tarball build's `git describe` climbs into the outer cp2k
+        // clone (checked out on tag v2026.2 here, exactly like the docker
+        // arm), so the installed DBCSRConfigVersion.cmake reports the
+        // malformed version `2026.2.v2026.2v2026.2` that SameMajorVersion
+        // rejects for find_package(DBCSR 2.8). The grep -c guard (the
+        // openblas-sed pattern of generate.rs) makes a glob miss fail the
+        // build loudly instead of silently continuing with a broken
+        // DBCSRConfigVersion.
+        //
+        // -DCP2K_USE_LIBTORCH=OFF: v2026.2's CMakeLists makes LIBTORCH
+        // follow CP2K_USE_EVERYTHING (generate.rs:422-427) and the
+        // toolchain `--install-all` set used by this path installs
+        // libtorch, so it must be explicitly OFF or the configure stage
+        // resolves a Torch dependency we do not want.
+        //
+        // -DCP2K_USE_OPENPMD=OFF: the phase-7 41-component comparison
+        // matrix showed the toolchain `--install-all` dependency set does
+        // not include openPMD, while CP2K v2026.2's CMakeLists requires it
+        // when USE_EVERYTHING is on (find_package(openPMD 0.16.1 REQUIRED),
+        // e2e runs 38404980161/38405057080) — OFF is the only configureable
+        // outcome for this dependency set (generate.rs:449).
         let build_sh = cp2k_dir.join("build_native.sh");
         let script = format!(
             r#"#!/bin/bash
 set -e
 source {}
+sed -i 's/set(PACKAGE_VERSION "[^"]*")/set(PACKAGE_VERSION "2.10.0")/' tools/toolchain/install/dbcsr-*/lib*/cmake/dbcsr/DBCSRConfigVersion.cmake
+[ "$(grep -h -c 'set(PACKAGE_VERSION "2.10.0")' tools/toolchain/install/dbcsr-*/lib*/cmake/dbcsr/DBCSRConfigVersion.cmake | awk '{{s+=$1}} END {{print s+0}}')" -ge 1 ]
 cmake -GNinja \
     -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
     -DCP2K_USE_EVERYTHING=ON \
     -DCP2K_USE_DLAF=OFF \
     -DCP2K_USE_PEXSI=OFF \
     -DCP2K_USE_DEEPMD=OFF \
+    -DCP2K_USE_LIBTORCH=OFF \
+    -DCP2K_USE_OPENPMD=OFF \
     -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF \
     -DCMAKE_C_FLAGS="-fno-lto" \
     -DCMAKE_CXX_FLAGS="-fno-lto" \
