@@ -466,6 +466,16 @@ fn t_w2_spack_2026_2_delegates_to_make_cp2k() {
             && content.contains("RUN ldconfig"),
         "T-W2: runtime must copy the spack opt tree + install tree + loader conf and run ldconfig (upstream install-stage pattern)"
     );
+    // Loader-conf normalization (e2e run 41426255507): BuildKit build
+    // containers lack /.dockerenv, so make_cp2k.sh writes the loader conf
+    // to install/bin/cp2k.conf; the build stage must install it into
+    // /etc/ld.so.conf.d/ (engine-agnostic branch) with a loud existence
+    // check before the runtime COPY can miss it.
+    assert!(
+        content.contains("cp /opt/cp2k/install/bin/cp2k.conf /etc/ld.so.conf.d/cp2k.conf")
+            && content.contains("test -f /etc/ld.so.conf.d/cp2k.conf"),
+        "T-W2: build stage must normalize the loader-conf location before the runtime COPY"
+    );
     assert!(
         content.contains("ENTRYPOINT [\"/opt/cp2k/install/bin/launch\"]"),
         "T-W2: entrypoint must be the upstream launch wrapper"

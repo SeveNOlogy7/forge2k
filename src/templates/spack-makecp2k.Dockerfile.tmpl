@@ -38,6 +38,20 @@ RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
 WORKDIR /opt/cp2k
 RUN ./make_cp2k.sh -cv {{VARIANT}} -mpi {{MPI}} -gm {{GPU_MODEL}}
 
+# Normalize the loader-conf location for the runtime COPY below. A BuildKit
+# build container has no /.dockerenv, so make_cp2k.sh takes its
+# not-in-container branch and writes the collected loader paths to
+# <install>/bin/cp2k.conf instead of /etc/ld.so.conf.d/cp2k.conf (observed
+# in e2e run 41426255507: the runtime COPY of the /etc path failed "not
+# found" while the whole delegated build had succeeded). Under a builder
+# that does set IN_CONTAINER=yes the /etc file already exists and the copy
+# is skipped; the test makes any future drift loud instead of a missing
+# file deep in the runtime stage.
+RUN if [ ! -f /etc/ld.so.conf.d/cp2k.conf ] && [ -f /opt/cp2k/install/bin/cp2k.conf ]; then \
+        cp /opt/cp2k/install/bin/cp2k.conf /etc/ld.so.conf.d/cp2k.conf; \
+    fi && \
+    test -f /etc/ld.so.conf.d/cp2k.conf
+
 FROM ubuntu:24.04 AS runtime
 RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
     rm -f /etc/apt/apt.conf.d/docker-clean && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-debs && \
