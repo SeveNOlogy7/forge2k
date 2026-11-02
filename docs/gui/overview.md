@@ -33,7 +33,7 @@ Forge2K 的图形界面与 CLI 完全对齐（对应关系逐项见[覆盖率矩
 !!! note "版本与 CPU 为何是下拉而非自由输入"
     CLI 的 `-v/--version` 与 `--cpu` 是自由字符串（拼错要到 Dockerfile 合成或源码 clone 阶段才失败）；GUI 刻意收窄为已知配置（与 `forge2k list` 所列一致），从源头避免拼写错误。这是刻意行为，详见[覆盖率矩阵](../coverage.md)第 2/4 行。
 
-**native 版本表**：GUI 的 native 版本下拉为 master / 2026.1 / 2025.2 / 2024.3，**刻意不含 2026.2**（上游 v2026.1 起删除根 Makefile，native release 臂仍走 make，选 2026.2 必败）。选中 native 时界面直接显示 "2026.2 has no verified native build matrix yet" 说明行。
+**native 版本表**：GUI 的 native 版本下拉为 master / 2025.2 / 2024.3，**刻意不含 2026.1 与 2026.2**（上游 v2026.1 起删除根 Makefile，native release 臂仍走 make，选 2026.1 或 2026.2 必败）。选中 native 时界面直接显示 "2026.1 & 2026.2 have no verified native build matrix yet" 说明行。
 
 ### 高级选项区（折叠面板，CLI 对齐）
 

@@ -59,7 +59,7 @@ Step 6 检查产物二进制并打印大小与 PATH 提示：
 
 ## 已知限制
 
-- **构建臂分界与 toolchain Docker 路径不同**：native 仅按是否 master 区分——只有 master 走 CMake+Ninja，其余版本（含 2026.1 / 2026.2）走 make；上游 ≥2026.1 已删除根 Makefile，因此 native + ≥2026.1（非 master）当前会失败（cmake 迁移登记 backlog；GUI 广告面已在 2026.2 摘除）
+- **构建臂分界与 toolchain Docker 路径不同**：native 仅按是否 master 区分——只有 master 走 CMake+Ninja，其余版本（含 2026.1 / 2026.2）走 make；上游 ≥2026.1 已删除根 Makefile，因此 native + ≥2026.1（非 master）当前会失败（cmake 迁移登记 backlog；GUI 广告面已清，2026.1 与 2026.2 均已从 native 版本下拉摘除）
 - 已在 GitHub Actions ubuntu runner 上验证 x86_64 / generic 两组合全链路构建 + 产物 `--version` 冒烟；CUDA 两组合为构建面支持，未经镜像级验证（runner 无 NVIDIA 驱动 / CUDA toolkit）
 - master + CUDA 组合被显式拒绝（见白名单矩阵）
 

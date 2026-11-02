@@ -878,11 +878,11 @@ impl Forge2kApp {
             );
         }
         if self.method == "native" {
-            // native_version_list() deliberately leaves out 2026.2 (see its
-            // doc comment): surface that instead of letting the user wonder
-            // why the picker is narrower than the CLI --version string.
+            // native_version_list() deliberately leaves out 2026.1 and 2026.2
+            // (see its doc comment): surface that instead of letting the user
+            // wonder why the picker is narrower than the CLI --version string.
             ui.label(
-                RichText::new("2026.2 has no verified native build matrix yet")
+                RichText::new("2026.1 & 2026.2 have no verified native build matrix yet")
                     .size(10.0)
                     .color(Color32::from_rgb(150, 150, 170)),
             );
@@ -2234,14 +2234,13 @@ impl Forge2kApp {
 
 /// Versions the native method advertises in its picker.
 ///
-/// 2026.2 is intentionally absent: upstream deleted the root Makefile in
-/// v2026.1 and the native release arm still builds via `make`, so a 2026.2
-/// selection could never succeed (cmake migration is backlog). "2026.1" is
-/// a baseline legacy entry with the same defect — kept for now, tracked in
-/// the README known-limitations backlog. `master` stays: the native arm
-/// uses cmake for it.
+/// 2026.1 and 2026.2 are intentionally absent: upstream deleted the root
+/// Makefile in v2026.1 and the native release arm still builds via `make`,
+/// so either selection could never succeed (cmake migration is backlog;
+/// they may return once that lands). `master` stays: the native arm uses
+/// cmake for it.
 pub(crate) fn native_version_list() -> Vec<String> {
-    ["master", "2026.1", "2025.2", "2024.3"]
+    ["master", "2025.2", "2024.3"]
         .into_iter()
         .map(String::from)
         .collect()
@@ -2582,13 +2581,19 @@ mod advanced_options_tests {
     }
 
     #[test]
-    fn t08_linkage_native_version_list_excludes_2026_2() {
+    fn t08_linkage_native_version_list_excludes_2026_1_and_2026_2() {
         let versions = native_version_list();
         assert!(
-            !versions.iter().any(|v| v == "2026.2"),
-            "2026.2 native is unverified and must stay out of the picker (T07)"
+            !versions.iter().any(|v| v == "2026.1"),
+            "2026.1 must stay out of the native picker: the release arm is \
+             make-only and upstream deleted the root Makefile in v2026.1 (T07)"
         );
-        for expected in ["master", "2026.1", "2025.2", "2024.3"] {
+        assert!(
+            !versions.iter().any(|v| v == "2026.2"),
+            "2026.2 must stay out of the native picker: the release arm is \
+             make-only and upstream deleted the root Makefile in v2026.1 (T07)"
+        );
+        for expected in ["master", "2025.2", "2024.3"] {
             assert!(
                 versions.iter().any(|v| v == expected),
                 "native picker must advertise {expected}"
