@@ -599,7 +599,7 @@ impl eframe::App for Forge2kApp {
                         .strong(),
                 );
                 ui.label(
-                    RichText::new("v1.0.1")
+                    RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                         .size(12.0)
                         .color(Color32::from_rgb(120, 120, 140)),
                 );
@@ -1970,7 +1970,7 @@ impl Forge2kApp {
                     .strong(),
             );
             ui.label(
-                RichText::new("Version 1.0.1")
+                RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
                     .size(14.0)
                     .color(Color32::from_rgb(120, 120, 140)),
             );

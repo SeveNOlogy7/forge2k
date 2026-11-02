@@ -30,7 +30,7 @@ forge2k build -m spack -v 2026.1 --mpi mpich --cpu x86_64 --variant psmp
 构建启动后日志会提示 **1-3 小时**量级，例如：
 
 ```text
-[10:32:01] 🔨 Forge2K Build Engine v1.0.1
+[10:32:01] 🔨 Forge2K Build Engine v1.1.0
 [10:32:01]    Method:    spack
 [10:32:01]    Version:   2026.1
 [10:32:01]    ...

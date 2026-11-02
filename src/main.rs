@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 #[derive(Parser)]
 #[command(
     name = "forge2k",
-    version = "1.0.1",
+    version = env!("CARGO_PKG_VERSION"),
     about = "🔥 Forge2K - One-click CP2K Docker Image Builder",
     long_about = "Forge2K: A beautiful GUI+CLI tool for building CP2K Docker images.\n\
                    Supports Spack-based (v2025.2+), Toolchain-based (v2023.2+), and\n\
@@ -728,8 +728,17 @@ fn print_banner() {
     println!();
     println!("{}", "╔══════════════════════════════════════╗".yellow());
     println!(
+        // Box width couples to the version string length: the padding assumes
+        // a 5-char "X.Y.Z" after the "v" prefix (all releases so far qualify).
+        // A longer version (e.g. 10.0.0 or a pre-release suffix) breaks
+        // alignment — adjust padding manually then.
         "{}",
-        "║          Forge2K  v1.0.1            ║".yellow().bold()
+        format!(
+            "║          Forge2K  v{}            ║",
+            env!("CARGO_PKG_VERSION")
+        )
+        .yellow()
+        .bold()
     );
     println!("{}", "║   CP2K Docker Image Builder         ║".yellow());
     println!("{}", "╚══════════════════════════════════════╝".yellow());

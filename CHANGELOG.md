@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-02
+
 ### Added（第八期 UI/CLI 覆盖率补齐 + 文档）
 
 - **GUI Build Tab 高级选项区（CLI build 选项全覆盖）**：新增 `--features` 预设勾选（由 `KNOWN_FEATURES` 注册表驱动，当前=deepmd，按 `features_supported_arm(method, version)` 联动禁用/启用，spack / master 等不合法组合即时置灰并显示原因）、`--no-cache` 勾选、自定义 Dockerfile 文本输入（失焦校验路径存在）与 `--force`（跳过 Docker 运行检查）勾选；features 与自定义 Dockerfile 互斥，同启即时提示；状态→`BuildConfig` 映射抽为无 ui 参数纯函数 `collect_build_config`（供单测）；`no_cache` / `force` / `features` / `dockerfile` 四字段持久化到 `~/.forge2k/settings.json`（全部 `#[serde(default)]`，旧版设置文件静默降级默认值，向后兼容）

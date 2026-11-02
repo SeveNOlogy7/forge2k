@@ -54,8 +54,11 @@ jobs:
           set -euo pipefail
           version_output="$(./target/release/forge2k --version)"
           echo "$version_output"
-          grep -q '^forge2k 1.0.1$' <<< "$version_output" \
-            || { echo "::error::unexpected --version output: $version_output"; exit 1; }
+          # Expected version is extracted from Cargo.toml, NOT hardcoded:
+          # the bump can never desynchronize this assertion again.
+          pkg_ver="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          grep -q "^forge2k ${pkg_ver}$" <<< "$version_output" \
+            || { echo "::error::unexpected --version output: '$version_output' (Cargo.toml says ${pkg_ver})"; exit 1; }
           list_output="$(./target/release/forge2k list)"
           echo "$list_output"
           [ -n "$list_output" ] \
