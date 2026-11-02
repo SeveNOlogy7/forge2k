@@ -877,16 +877,6 @@ impl Forge2kApp {
                     .color(Color32::from_rgb(255, 200, 80)),
             );
         }
-        if self.method == "native" {
-            // native_version_list() deliberately leaves out 2026.1 and 2026.2
-            // (see its doc comment): surface that instead of letting the user
-            // wonder why the picker is narrower than the CLI --version string.
-            ui.label(
-                RichText::new("2026.1 & 2026.2 have no verified native build matrix yet")
-                    .size(10.0)
-                    .color(Color32::from_rgb(150, 150, 170)),
-            );
-        }
         ui.add_space(6.0);
 
         // MPI
@@ -2004,7 +1994,7 @@ impl Forge2kApp {
             ui.label(RichText::new("⚠ Known limitations").size(14.0).strong());
             let limitations = [
                 "• Toolchain CUDA (P100/V100) variants: full image-level e2e deferred",
-                "• 2026.1, 2026.2 & master: no bundled Dockerfile, synthesized per build (e2e deferred)",
+                "• 2026.1, 2026.2 & master: no bundled Dockerfile, synthesized per build (2026.2 verified image-level and via the native cmake arm, run 41454929016; 2026.1/master image-level e2e deferred)",
                 "• Release-mode CLI build: docker stdout not forwarded (kept as-is, pending OD-1)",
             ];
             for l in &limitations {
@@ -2234,13 +2224,12 @@ impl Forge2kApp {
 
 /// Versions the native method advertises in its picker.
 ///
-/// 2026.1 and 2026.2 are intentionally absent: upstream deleted the root
-/// Makefile in v2026.1 and the native release arm still builds via `make`,
-/// so either selection could never succeed (cmake migration is backlog;
-/// they may return once that lands). `master` stays: the native arm uses
-/// cmake for it.
+/// The cmake migration landed: `master || >= 2026.1` (including master
+/// builds via cmake; e2e-verified for 2026.2, run 41454929016), so
+/// master/2026.1/2026.2 are restored after verification, ahead of the
+/// make-arm releases 2025.2/2024.3 (newest first).
 pub(crate) fn native_version_list() -> Vec<String> {
-    ["master", "2025.2", "2024.3"]
+    ["master", "2026.1", "2026.2", "2025.2", "2024.3"]
         .into_iter()
         .map(String::from)
         .collect()
@@ -2581,23 +2570,19 @@ mod advanced_options_tests {
     }
 
     #[test]
-    fn t08_linkage_native_version_list_excludes_2026_1_and_2026_2() {
+    fn t08_linkage_native_version_list_restores_cmake_arm_versions() {
+        // Positive pin, newest-first order: the native cmake migration
+        // landed (master || >= 2026.1 builds via cmake; e2e-verified for
+        // 2026.2, run 41454929016), so the picker advertises the full set
+        // again. No negative version assertions: CUDA combinations are
+        // rejected by validate_native_config (Step 0, pinned by
+        // t_native_cmake_boundary_*), not by picker omission.
         let versions = native_version_list();
-        assert!(
-            !versions.iter().any(|v| v == "2026.1"),
-            "2026.1 must stay out of the native picker: the release arm is \
-             make-only and upstream deleted the root Makefile in v2026.1 (T07)"
+        assert_eq!(
+            versions,
+            ["master", "2026.1", "2026.2", "2025.2", "2024.3"],
+            "native picker must advertise the full restored set (cmake arm: \
+             master/2026.1/2026.2; make arm: 2025.2/2024.3), newest first"
         );
-        assert!(
-            !versions.iter().any(|v| v == "2026.2"),
-            "2026.2 must stay out of the native picker: the release arm is \
-             make-only and upstream deleted the root Makefile in v2026.1 (T07)"
-        );
-        for expected in ["master", "2025.2", "2024.3"] {
-            assert!(
-                versions.iter().any(|v| v == expected),
-                "native picker must advertise {expected}"
-            );
-        }
     }
 }

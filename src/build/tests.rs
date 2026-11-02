@@ -2131,26 +2131,28 @@ fn t_wave3_master_and_make_arms_render_no_openpmd_off() {
 }
 
 // --------------------------------------------------------
-// Review followup: native 2026.2 advertisement removal
+// Review followup reversal: native advertisement restored after cmake e2e
 // --------------------------------------------------------
 //
-// Adversarial review (verdict=confirmed): gui.rs's native version list
-// advertised 2026.2 while the native release arm still built via `make`
-// (its use_cmake predicate only covered master) and upstream deleted the
-// root Makefile in v2026.1 — every `make` on a 2026.x tree fails. The
-// advertisement surface stays dropped until the native cmake migration is
-// e2e-verified: Wave 1 moved the native arm to cmake for `master ||
-// >= 2026.1` (execute.rs), and Wave 3 restores the list only after the
-// native_2026.2 e2e run is green.
+// The adversarial review that once dropped 2026.2 from the native list
+// (the release arm still built via `make` while upstream had deleted the
+// root Makefile in v2026.1 — every `make` on a 2026.x tree fails) is
+// satisfied the other way now: Wave 1 moved the native arm to cmake for
+// `master || >= 2026.1` (execute.rs) and the native_2026.2_x86_64_none
+// e2e run went green (run 41454929016), so the picker advertises the
+// full set again. CUDA combinations stay rejected by
+// validate_native_config (Step 0; pinned by t_native_cmake_boundary_*),
+// not by picker omission.
 
 #[test]
-fn t_review_native_advertised_versions_exclude_2026_2() {
+fn t_review_native_advertised_versions_restored_after_cmake_e2e() {
     let vs = crate::gui::native_version_list();
-    assert!(
-        !vs.iter().any(|v| v == "2026.2"),
-        "review followup: native version list must not advertise 2026.2 \
-         (advertisement returns only after the native cmake e2e run is green), got: {:?}",
-        vs
+    assert_eq!(
+        vs,
+        ["master", "2026.1", "2026.2", "2025.2", "2024.3"],
+        "review followup reversal: native picker must advertise the full \
+         verified set (cmake arm: master/2026.1/2026.2; make arm: \
+         2025.2/2024.3), newest first"
     );
     // The toolchain context keeps its 2026.2 support untouched (this
     // branch's deliverable): sanity-pin that the version still renders
