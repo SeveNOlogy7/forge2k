@@ -773,16 +773,28 @@ pub fn execute_native_build(
         let setup_script = toolchain_dir.join("install").join("setup");
         // Create a build script that sources setup then runs cmake+ninja.
         //
-        // dbcsr version sed: same patch as the toolchain release-cmake arm
-        // (generate.rs release-cmake step, probe run 38393254283) — the
-        // dbcsr tarball build's `git describe` climbs into the outer cp2k
-        // clone (checked out on tag v2026.2 here, exactly like the docker
-        // arm), so the installed DBCSRConfigVersion.cmake reports the
-        // malformed version `2026.2.v2026.2v2026.2` that SameMajorVersion
-        // rejects for find_package(DBCSR 2.8). The grep -c guard (the
-        // openblas-sed pattern of generate.rs) makes a glob miss fail the
-        // build loudly instead of silently continuing with a broken
-        // DBCSRConfigVersion.
+        // dbcsr version pin: overwrite the installed DBCSRConfigVersion.cmake
+        // with the canonical CMake SameMajorVersion body for 2.10.0. Same
+        // problem as the toolchain release-cmake arm (generate.rs
+        // release-cmake step, probe run 38393254283): the dbcsr tarball
+        // build's `git describe` climbs into the outer cp2k clone (checked
+        // out on support/v2026.2 here), so dbcsr_VERSION renders as the
+        // malformed `2026.2.v2026.2v2026.2` (a two-component tag defeats all
+        // three VERSION_PATCH/MINOR regexes, which then emit the raw
+        // describe output) and find_package(DBCSR 2.8) — which dbcsr's
+        // ConfigVersion gates via write_basic_package_version_file
+        // (COMPATIBILITY SameMajorVersion) — rejects it. The toolchain arm
+        // fixes the `set(PACKAGE_VERSION ...)` line with a sed; that is NOT
+        // sufficient here: the same template bakes the raw version into the
+        // `if("<raw>" MATCHES "^([0-9]+)\\.")` major-version extraction, so
+        // with only the set line patched CVF_VERSION_MAJOR parses as "2026"
+        // and SameMajorVersion still rejects (native e2e run 41424910480:
+        // "DBCSRConfig.cmake, version: 2.10.0 — not compatible"). The
+        // overwrite carries clean literals in every position, so the file
+        // states 2.10.0 for both extraction and major parse. The grep -c
+        // guard (the openblas-sed pattern of generate.rs) makes a glob miss
+        // fail the build loudly instead of silently continuing with a
+        // broken DBCSRConfigVersion.
         //
         // -DCP2K_USE_LIBTORCH=OFF: v2026.2's CMakeLists makes LIBTORCH
         // follow CP2K_USE_EVERYTHING (generate.rs:422-427) and the
@@ -801,7 +813,32 @@ pub fn execute_native_build(
             r#"#!/bin/bash
 set -e
 source {}
-sed -i 's/set(PACKAGE_VERSION "[^"]*")/set(PACKAGE_VERSION "2.10.0")/' tools/toolchain/install/dbcsr-*/lib*/cmake/dbcsr/DBCSRConfigVersion.cmake
+for f in tools/toolchain/install/dbcsr-*/lib*/cmake/dbcsr/DBCSRConfigVersion.cmake; do
+cat > "$f" <<'CP2K_DBCSR_CFGVER'
+set(PACKAGE_VERSION "2.10.0")
+
+if(PACKAGE_VERSION VERSION_LESS PACKAGE_FIND_VERSION)
+  set(PACKAGE_VERSION_COMPATIBLE FALSE)
+else()
+  if("2.10.0" MATCHES "^([0-9]+)\\.")
+    set(CVF_VERSION_MAJOR "${{CMAKE_MATCH_1}}")
+    if(NOT CVF_VERSION_MAJOR VERSION_EQUAL 0)
+      string(REGEX REPLACE "^0+" "" CVF_VERSION_MAJOR "${{CVF_VERSION_MAJOR}}")
+    endif()
+  else()
+    set(CVF_VERSION_MAJOR "2.10.0")
+  endif()
+  if(PACKAGE_FIND_VERSION_MAJOR STREQUAL CVF_VERSION_MAJOR)
+    set(PACKAGE_VERSION_COMPATIBLE TRUE)
+  else()
+    set(PACKAGE_VERSION_COMPATIBLE FALSE)
+  endif()
+  if(PACKAGE_FIND_VERSION STREQUAL PACKAGE_VERSION)
+    set(PACKAGE_VERSION_EXACT TRUE)
+  endif()
+endif()
+CP2K_DBCSR_CFGVER
+done
 [ "$(grep -h -c 'set(PACKAGE_VERSION "2.10.0")' tools/toolchain/install/dbcsr-*/lib*/cmake/dbcsr/DBCSRConfigVersion.cmake | awk '{{s+=$1}} END {{print s+0}}')" -ge 1 ]
 cmake -GNinja \
     -DCMAKE_INSTALL_PREFIX=/opt/cp2k/install \
