@@ -605,7 +605,18 @@ jobs:
           # that prints "CP2K" but not "CP2K version 2026.2" must not read
           # as success, so WANT carries the exact release line there.
           case "${VARIANT}" in
-            native_2026.*) EXE=/opt/cp2k/install/bin/cp2k.psmp; WANT='CP2K version 2026.2' ;;
+            native_2026.*)
+              EXE=/opt/cp2k/install/bin/cp2k.psmp
+              WANT='CP2K version 2026.2'
+              # libcp2k.so.2026.2 lives in the cmake install tree: the loader
+              # needs it on LD_LIBRARY_PATH — the same wiring as the
+              # toolchain-arm image entrypoint (generate.rs link_step:
+              # export LD_LIBRARY_PATH=/opt/cp2k/install/lib after sourcing
+              # setup). Run 41439668508 proved both un-patched routes die
+              # with rc=127 ("libcp2k.so.2026.2: cannot open shared object
+              # file") despite the exe passing the assert step.
+              export LD_LIBRARY_PATH="/opt/cp2k/install/lib:${LD_LIBRARY_PATH:-}"
+              ;;
             *)             EXE=/opt/cp2k_build/cp2k/exe/local/cp2k.psmp; WANT='CP2K' ;;
           esac
           SETUP=/opt/cp2k_build/cp2k/tools/toolchain/install/setup
