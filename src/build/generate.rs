@@ -116,6 +116,19 @@ pub(crate) fn generate_dockerfile_content(config: &BuildConfig) -> Result<String
 }
 
 fn generate_spack_dockerfile(config: &BuildConfig) -> Result<String> {
+    // Upstream layout boundary: v2026.2 rearranged tools/spack
+    // (cp2k_dev_repo/ -> spack_repo/cp2k_dev/, cp2k_deps_all_*.yaml ->
+    // cp2k_deps_*.yaml), invalidating both references the legacy arm below
+    // renders. From 2026.2 on — and for master, which carries the same new
+    // layout plus the repo-root make_cp2k.sh (verified on both refs) — the
+    // Dockerfile delegates dependency+build to that upstream script, so no
+    // tools/spack internal path is baked into the render. String >=
+    // comparison mirrors toolchain_uses_cmake's boundary style (CP2K minors
+    // are single-digit, so lexical order is chronological here).
+    if config.version == "master" || config.version.as_str() >= "2026.2" {
+        return generate_spack_makecp2k_dockerfile(config);
+    }
+
     let cpu = &config.cpu;
     let mpi = &config.mpi;
     let version = &config.version;
@@ -183,6 +196,39 @@ fn generate_spack_dockerfile(config: &BuildConfig) -> Result<String> {
             ("SPACK_PKGS_VER", spack_pkgs_ver),
             ("MPI_SETUP", &mpi_setup),
             ("DEPS_YAML", deps_yaml),
+        ],
+    ))
+}
+
+/// The make_cp2k.sh delegation arm for spack >= 2026.2 and master (see the
+/// boundary comment in [`generate_spack_dockerfile`]). Parameters map 1:1
+/// onto the upstream script's flags (`-cv` variant, `-mpi` MPI flavor,
+/// `-gm` GPU model); parallelism and the "folder" source cache stay on the
+/// script's own defaults. make_cp2k.sh has no concretizer-target flag and
+/// cp2k_deps_*.yaml pins no target (host-natural concretization), so
+/// `--cpu` is advisory on this arm.
+fn generate_spack_makecp2k_dockerfile(config: &BuildConfig) -> Result<String> {
+    let git_clone = if config.version == "master" {
+        canon_git_clone_block(&config.version, "master")
+    } else {
+        canon_git_clone_block(&config.version, &format!("support/v{}", config.version))
+    };
+    // CUDA none maps to the script's default `-gm none`; P100/V100 map
+    // natively onto its GPU table. A GPU request without a CUDA toolkit in
+    // the image fails loud inside the script — an unregistered combination
+    // must not silently build a CPU binary.
+    let gpu_model = if config.cuda == "none" {
+        "none"
+    } else {
+        config.cuda.as_str()
+    };
+    Ok(render_template(
+        include_str!("../templates/spack-makecp2k.Dockerfile.tmpl"),
+        &[
+            ("GIT_CLONE", &git_clone),
+            ("VARIANT", &config.variant),
+            ("MPI", &config.mpi),
+            ("GPU_MODEL", gpu_model),
         ],
     ))
 }
