@@ -98,13 +98,13 @@
 
 **解决**：**升级/使用当前版本的 deepmd preset 即可**——渲染时会在工具链安装前注入一个 RUN，把 `install_openblas.sh` 的两处 make 调用改为 `SMALL_MATRIX_OPT=0`（make 命令行变量覆盖 makefile 默认值，并经 MAKEFLAGS 传入递归子 make），镜像以关闭该优化的 OpenBLAS 构建。该修复已经过计算级验证：e2e run 39286488384 中 `deepmd-water` np1/np2 均 rc=0，能量与上游参考值逐位一致。不带 `--features` 的所有臂渲染逐字节不变（无此补丁）。
 
-## spack 方法为什么不能构建 2026.2 { #spack-2026-2 }
+## spack 2026.2 / master：构建臂分界与受支持组合 { #spack-2026-2 }
 
-**症状**：`forge2k build -m spack -v 2026.2 ...`（或 `--generate-only` 后的 `docker build`）失败；版本下拉里 spack 看不到 2026.2。
+**现状**：spack 方法**支持** v2026.2 与 master。上游 support/v2026.2 重排了 `tools/spack` 目录（`cp2k_dev_repo` → `spack_repo/cp2k_dev`、deps yaml 改名、spack 包本体移出上游仓库），旧 spack 布局模板对 2026.2+ 已失效，因此构建臂按版本分界：**2025.2 / 2026.1 走旧 spack 布局臂**（引用 `tools/spack` 内部路径）；**2026.2 / master 委托上游仓库根 `make_cp2k.sh` 一体化脚本**（自装 Spack、解析依赖、CMake+Ninja 构建，不引用 `tools/spack` 内部路径，上游再重排不受影响）。
 
-**原因**：上游 support/v2026.2 重排了 `tools/spack` 目录（`cp2k_dev_repo` → `spack_repo/cp2k_dev`、deps yaml 改名、spack 包本体已从上游仓库移除），现有 spack 合成模板引用的路径失效——实际 `docker build` 必败。配置目录因此**不再广告** spack 2026.2（list 与 GUI 均不显示）。
+**如何确认你的组合受支持**：`forge2k list` 与 GUI Configs 页按注册渲染——spack 2026.2 注册的是单组合 **mpich/x86_64/psmp**（与 e2e 验证面 `spack_2026.2_x86_64` 对齐，不广告未验证组合；CLI 自由字符串可合成其他组合但未经验证）。合成路径可先用 `--generate-only` 检查 Dockerfile 再实际构建。
 
-**解决**：2026.2 使用 **toolchain** 方法（`forge2k build -m toolchain -v 2026.2 ...`，generic CPU 与 CUDA P100 两个合成组合均可用，已过 e2e 编译验证）。`--generate-only` 对 spack 2026.2 仍可合成出 Dockerfile（不做硬挡），但拿它去 `docker build` 会失败——请勿这样用。
+**注意**：2026.2 / master 委托臂未接入 Spack buildcache（上游脚本自管其缓存），冷构建为**小时级**——构建长时间停在依赖编译属预期，不是卡死。
 
 ## 其他
 

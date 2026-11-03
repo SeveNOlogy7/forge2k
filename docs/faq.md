@@ -30,9 +30,9 @@
 
 `list` 只扫描捆绑的 `dockerfiles/spack/` 与 `dockerfiles/toolchain/` 目录并附加已知 synthesized 配置；native 不经 Docker、没有 Dockerfile，因此不在 list 范围内，`list --method` 的枚举也只有 spack/toolchain（GUI Configs 页的过滤下拉一致）。native 的版本/组合约束见 `build -m native --help` 与 GUI Build 页的 native 选项说明。
 
-## spack + 2026.2 为什么构建失败？
+## spack 方法支持 2026.2 / master 吗？
 
-上游 support/v2026.2 重排了 `tools/spack` 目录，现有 spack 模板引用失效，因此配置目录不再广告 spack 2026.2。2026.2 请用 toolchain 方法。详见[故障排查](troubleshooting.md#spack-2026-2)。
+支持。构建臂按版本分界：2025.2 / 2026.1 走旧 spack 布局模板，2026.2 / master 委托上游仓库根 `make_cp2k.sh` 一体化脚本（注册单组合 mpich/x86_64/psmp；委托臂冷构建为小时级属预期）。toolchain 方法对 2026.2 同样可用，两者皆可。详见[故障排查](troubleshooting.md#spack-2026-2)。
 
 ## 为什么 GUI 的 CUDA 下拉在 spack 下没有 P100/V100？
 

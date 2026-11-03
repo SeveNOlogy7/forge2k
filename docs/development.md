@@ -55,9 +55,9 @@ cargo test --all-targets              # 单元 + 行为测试
 
 ## E2E（镜像构建硬门）
 
-`.github/workflows/e2e-images.yml` 为手动触发（`workflow_dispatch`，`variant` 输入），用 debug 二进制驱动真实构建，共 **8 个变体**（guard 白名单）：
+`.github/workflows/e2e-images.yml` 为手动触发（`workflow_dispatch`，`variant` 输入），用 debug 二进制驱动真实构建，共 **10 个变体**（guard 白名单）：
 
-`cuda_P100` / `cuda_V100`（toolchain 2023.2 make 臂）、`spack_2025.2_x86_64`、`native_2023.2_x86_64_none`、`native_2023.2_generic_none`（runner 直连构建，无 Docker）、`toolchain_2026.2_generic`、`cuda_2026.2_P100`（2026.2 cmake 臂）、`toolchain_2026.2_generic_deepmd`（deepmd preset）。
+`cuda_P100` / `cuda_V100`（toolchain 2023.2 make 臂）、`spack_2025.2_x86_64`、`spack_2026.2_x86_64`（2026.2 make_cp2k.sh 委托臂）、`native_2023.2_x86_64_none`、`native_2023.2_generic_none`、`native_2026.2_x86_64_none`（runner 直连构建，无 Docker；2026.2 走 cmake 臂）、`toolchain_2026.2_generic`、`cuda_2026.2_P100`（2026.2 cmake 臂）、`toolchain_2026.2_generic_deepmd`（deepmd preset）。
 
 硬门（失败即红）：
 
