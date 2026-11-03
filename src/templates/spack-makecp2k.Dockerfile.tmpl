@@ -59,6 +59,14 @@ RUN --mount=type=cache,target=/var/cache/apt,id=apt-2404,sharing=locked \
     ca-certificates g++ gcc gfortran python3 \
     && rm -rf /var/lib/apt/lists/*
 
+# Pin the stage WORKDIR to /opt/cp2k before the relative COPY destinations
+# below, exactly like the upstream install stage (Dockerfile.test_spack_*):
+# ./install and ./spack/... must resolve back to their build-stage absolute
+# paths, because ENTRYPOINT, PATH, the loader-conf paths and the compiled-in
+# share/cp2k/data default all reference /opt/cp2k/... (e2e run 41469797162:
+# without this WORKDIR the trees landed under / and the smoke step died with
+# exec: "/opt/cp2k/install/bin/launch": no such file or directory).
+WORKDIR /opt/cp2k
 # Dependency stack: the whole spack install tree — the environment "view"
 # is a symlink farm into opt/spack/<arch>/<hash>, so the view alone cannot
 # be copied (the upstream install stage copies the same tree).

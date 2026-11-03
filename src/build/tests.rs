@@ -487,6 +487,32 @@ fn t_w2_spack_2026_2_delegates_to_make_cp2k() {
 }
 
 #[test]
+fn t_w2_spack_makecp2k_runtime_workdir_pins_absolute_layout() {
+    // e2e run 41469797162: the image built green, then the smoke step died
+    // with exec: "/opt/cp2k/install/bin/launch": stat ... no such file or
+    // directory. The runtime COPY destinations are relative (./install,
+    // ./spack/...) and resolve against the stage's WORKDIR; upstream's
+    // install stage pins WORKDIR /opt/cp2k first, so the trees land back at
+    // their build-stage absolute paths. Without that WORKDIR the copies land
+    // under / and every absolute reference (ENTRYPOINT, PATH, the
+    // loader-conf paths, compiled-in share/cp2k/data) dangles.
+    let c = base_config("spack", "2026.2", "mpich", "x86_64", "none", "psmp");
+    let content = generate_dockerfile_content(&c).expect("render make_cp2k arm");
+    let runtime_from = content
+        .find("FROM ubuntu:24.04 AS runtime")
+        .expect("runtime stage marker");
+    let runtime_stage = &content[runtime_from..];
+    let first_copy = runtime_stage
+        .find("COPY --from=build_cp2k")
+        .expect("first runtime COPY from build stage");
+    let before_copies = &runtime_stage[..first_copy];
+    assert!(
+        before_copies.contains("WORKDIR /opt/cp2k"),
+        "T-W2: runtime stage must set WORKDIR /opt/cp2k before the relative COPY destinations (e2e 41469797162: ENTRYPOINT /opt/cp2k/install/bin/launch went missing when the trees were copied to /)"
+    );
+}
+
+#[test]
 fn t_w2_spack_master_takes_make_cp2k_arm_too() {
     // master shares the v2026.2 tools/spack layout and the repo-root
     // make_cp2k.sh (verified on both refs), so it rides the same arm —
