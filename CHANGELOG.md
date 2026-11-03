@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+### Added（native cmake 迁移线）
+
+- **native ≥2026.1 CMake 迁移**：构建谓词从仅 `master` 扩为 `master || >= 2026.1`（master / 2026.1 / 2026.2 同走 CMake+Ninja 臂）；cmake 分支旗标补 `-DCP2K_USE_LIBTORCH=OFF` + `-DCP2K_USE_OPENPMD=OFF`（对齐 toolchain release-cmake 全套旗标集），dbcsr config 版本补丁由 sed 行升级为 **canonical SameMajorVersion 整文件覆写**（两段式 set 行补丁会把 `CVF_VERSION_MAJOR` 解析成 "2026"，仍遭 SameMajorVersion 语义拒绝）；`validate_native_config` CUDA 特判同步扩为 uses_cmake 语义（cmake 臂版本 + CUDA 组合继续显式拒绝，不静默错建）；GUI native 版本下拉恢复五项 master / 2026.1 / 2026.2 / 2025.2 / 2024.3（两处测试反转 + Build Tab / About 文案同步清偿失实摘除）。e2e `native_2026.2_x86_64_none` 全绿（run 41454929016：cmake 臂构建退出码 0、产物断言 `/opt/cp2k/install/bin/cp2k.psmp`、smoke `grep 'CP2K version 2026.2'` 版本硬门）
+
+### Fixed（native cmake 迁移线）
+
+- **e2e native 臂验收按构建臂分派**：workflow `-v 2023.2` 硬编码参数化（新变体 `native_2026.2_x86_64_none` 接入 options / case 白名单）；`--cpu` env 映射重构（2023.2 专有名判断 + 失实注释清理）；assert / smoke / evidence 验收三步按臂分派产物路径（make → `exe/<arch>`，cmake → `/opt/cp2k/install/bin`），cmake 臂构建绿不再必红在 make 布局断言；native smoke 为 cmake 臂补 cmake install lib 目录的 `LD_LIBRARY_PATH` 注入
+
+### Added（spack 2026.2 委托臂线）
+
+- **spack 2026.2 支持（master 一并走同臂）：make_cp2k.sh 委托**：上游 support/v2026.2 重排 `tools/spack` 后旧模板引用失效，分臂谓词 `master || >= 2026.2` 引入新合成模板 `spack-makecp2k`——构建阶段单条 `./make_cp2k.sh` 委托（上游 v2.0 官方 Spack+CMake 一体化脚本，自装 Spack、解析依赖、CMake+Ninja 构建，装至 `cp2k/spack/` + `cp2k/install/`），不引用 `tools/spack` 内部路径；2025.2 / 2026.1 旧臂渲染零变化（2026.1 合成输出与 main 逐字节相同）；catalog 注册单组合 mpich/x86_64/psmp（与 e2e 验证面对齐，不广告未验证组合；master 同臂有专测锁定）。e2e `spack_2026.2_x86_64` 全绿（run 41551594889：镜像 `cp2k/cp2k:2026.2_mpich_x86_64_psmp`，容器内 `cp2k --version` 硬门输出 `CP2K version 2026.2`）。注意：新臂未接入 Spack buildcache（上游脚本自管其缓存），冷构建为小时级
+
+### Fixed（spack 2026.2 委托臂线）
+
+- **e2e 三轮修复**（如实记录）：第 1 轮 run 41426255507——make_cp2k.sh 全量构建成功（依赖 + CP2K 安装）但 runtime `COPY /etc/ld.so.conf.d/cp2k.conf` 报 not found：BuildKit 构建容器无 `/.dockerenv`，脚本的 IN_CONTAINER 探测走非容器分支、把 loader 配置写到 `<install>/bin/cp2k.conf`（修复：构建段检测 `/etc` 路径缺失时补位拷入并硬检文件存在，构建器显式设 `IN_CONTAINER=yes` 时跳过、保持引擎无关）；第 2 轮 run 41469797162——镜像构建成功但 `ENTRYPOINT /opt/cp2k/install/bin/launch` 缺失：runtime 段相对 COPY 目的地把安装树拷到了 `/` 下而非 `/opt/cp2k`；第 3 轮修复——runtime 段在相对 COPY 之前 pin `WORKDIR /opt/cp2k` 恢复布局，终态 run 41551594889 全绿
+
 ## [1.1.0] - 2026-11-02
 
 ### Added（第八期 UI/CLI 覆盖率补齐 + 文档）
