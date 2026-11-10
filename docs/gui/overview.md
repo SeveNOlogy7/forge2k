@@ -4,11 +4,11 @@ Forge2K 的图形界面与 CLI 完全对齐（对应关系逐项见[覆盖率矩
 
 启动方式：`forge2k gui`（别名 `forge2k g`），或直接运行不带参数的 `forge2k`——无子命令时默认进入 GUI。窗口默认 1024×720（最小 800×600），标题为 "Forge2K - CP2K Docker Image Builder"。
 
-![Build 页](assets/gui-build.png)
-![Configs 页](assets/gui-configs.png)
-![System 页](assets/gui-system.png)
-![Settings 页](assets/gui-settings.png)
-![About 页](assets/gui-about.png)
+![Build 页](../assets/gui-build.png)
+![Configs 页](../assets/gui-configs.png)
+![System 页](../assets/gui-system.png)
+![Settings 页](../assets/gui-settings.png)
+![About 页](../assets/gui-about.png)
 *五 Tab 实景截图（v1.1.0；Configs 页 #1 即新注册的 spack 2026.2 组合）*
 
 ## 窗口总览
