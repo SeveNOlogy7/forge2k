@@ -738,7 +738,7 @@ impl Forge2kApp {
         };
         let mut open = true;
         egui::Window::new(
-            RichText::new("📄 Dockerfile 预览 / Dockerfile Preview")
+            RichText::new("📄 Dockerfile Preview")
                 .size(14.0)
                 .color(Color32::from_rgb(255, 200, 50))
                 .strong(),
@@ -1048,7 +1048,7 @@ impl Forge2kApp {
     /// commit point via `persist_settings`.
     fn render_advanced_options(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new(
-            RichText::new("高级选项 / Advanced Options")
+            RichText::new("Advanced Options")
                 .size(14.0)
                 .color(Color32::from_rgb(255, 200, 50)),
         )

@@ -24,6 +24,7 @@
 
 - **Build Tab 面板塌陷视觉缺陷（基线遗留，W4-T6 截图时经像素级验证发现）**：`render_build_tab` 把 `SidePanel::left` + `CentralPanel::show_inside` 包在 `ui.horizontal` 闭包内——egui 0.31 下面板被压成单行高，两个 ScrollArea 内容全部零高裁剪（仅左右标题渲染，表单/构建日志区一片空白；a11y 树逻辑控件齐全，因此此前基于无障碍树的验证均未暴露）。修复：两面板直接挂载到 Tab 的 Ui（egui 面板并排的标准用法），移除 horizontal 包裹层；v1.0.1 起即存在此结构，非本期回归
 - **暗色主题下拉框白底白字（用户报告）**：自定义主题从 egui 默认**亮色** style 克隆后逐字段打补丁，`dark_mode = true` 仅翻转标志位、不重新推导任何颜色——所有未显式覆盖的字段（ComboBox 按钮与弹出层填充、widgets fg_stroke 等）保持亮色残留，弹出选项与关闭态选定值白底白字不可读。修复：改为先整体派生 `Visuals::dark()` 再叠加自定义覆盖（panel/window/faint/extreme bg 与 override_text_color 等既有覆盖全部保留），下拉框按钮、弹出层、按钮文字全部恢复深底浅字
+- **GUI 标签移除中文字符（用户报告：egui 默认字体缺 CJK 字形渲染为方块）**："高级选项 / Advanced Options" 折叠头与 "📄 Dockerfile 预览 / Dockerfile Preview" 预览窗标题改为纯英文（"Advanced Options" / "📄 Dockerfile Preview"）——egui 默认字体集不含 CJK 字形，中文字符渲染为占位方块；界面本为纯英文定位，移除双语前缀而非嵌入字体
 
 ## [1.1.0] - 2026-11-02
 
