@@ -574,7 +574,11 @@ impl eframe::App for Forge2kApp {
 
         // ===== Custom style =====
         let mut style = (*ctx.style()).clone();
-        style.visuals.dark_mode = true;
+        // Derive from egui's dark palette FIRST: `dark_mode = true` alone only
+        // flips a flag and re-derives nothing, so every field not explicitly
+        // patched below stayed LIGHT — combo popups and buttons rendered
+        // white-on-white (user report, W4-T6 screenshot QA).
+        style.visuals = egui::Visuals::dark();
         style.visuals.override_text_color = Some(Color32::from_rgb(220, 220, 220));
         style.visuals.window_fill = Color32::from_rgb(18, 18, 24);
         style.visuals.panel_fill = Color32::from_rgb(24, 24, 32);
@@ -692,24 +696,27 @@ impl Forge2kApp {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
 
-        ui.horizontal(|ui| {
-            // ─── LEFT: Configuration Panel ───
-            egui::SidePanel::left("config_panel")
-                .resizable(false)
-                .default_width(280.0)
-                .min_width(240.0)
-                .show_inside(ui, |ui| {
-                    ScrollArea::vertical().show(ui, |ui| {
-                        self.render_build_config_fields(ui);
-                        self.render_advanced_options(ui);
-                        self.render_build_controls(ui, is_building_val);
-                    });
+        // NOTE: the panels attach directly to the tab's Ui — NOT inside a
+        // `ui.horizontal` wrapper. Wrapping `SidePanel`/`CentralPanel`
+        // `show_inside` in a horizontal layout squashes both panels to a
+        // single row's height, so their ScrollArea contents collapse to
+        // nothing (headers render, every widget below vanishes — egui 0.31).
+        // ─── LEFT: Configuration Panel ───
+        egui::SidePanel::left("config_panel")
+            .resizable(false)
+            .default_width(280.0)
+            .min_width(240.0)
+            .show_inside(ui, |ui| {
+                ScrollArea::vertical().show(ui, |ui| {
+                    self.render_build_config_fields(ui);
+                    self.render_advanced_options(ui);
+                    self.render_build_controls(ui, is_building_val);
                 });
-
-            // ─── RIGHT: Build Log ───
-            egui::CentralPanel::default().show_inside(ui, |ui| {
-                self.render_build_log_panel(ui, is_building_val);
             });
+
+        // ─── RIGHT: Build Log ───
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            self.render_build_log_panel(ui, is_building_val);
         });
 
         // Floating preview window (opened by "Generate Only"); a no-op while

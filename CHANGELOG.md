@@ -20,6 +20,11 @@
 
 - **e2e 三轮修复**（如实记录）：第 1 轮 run 41426255507——make_cp2k.sh 全量构建成功（依赖 + CP2K 安装）但 runtime `COPY /etc/ld.so.conf.d/cp2k.conf` 报 not found：BuildKit 构建容器无 `/.dockerenv`，脚本的 IN_CONTAINER 探测走非容器分支、把 loader 配置写到 `<install>/bin/cp2k.conf`（修复：构建段检测 `/etc` 路径缺失时补位拷入并硬检文件存在，构建器显式设 `IN_CONTAINER=yes` 时跳过、保持引擎无关）；第 2 轮 run 41469797162——镜像构建成功但 `ENTRYPOINT /opt/cp2k/install/bin/launch` 缺失：runtime 段相对 COPY 目的地把安装树拷到了 `/` 下而非 `/opt/cp2k`；第 3 轮修复——runtime 段在相对 COPY 之前 pin `WORKDIR /opt/cp2k` 恢复布局，终态 run 41551594889 全绿
 
+### Fixed（GUI Build Tab 布局与暗色主题）
+
+- **Build Tab 面板塌陷视觉缺陷（基线遗留，W4-T6 截图时经像素级验证发现）**：`render_build_tab` 把 `SidePanel::left` + `CentralPanel::show_inside` 包在 `ui.horizontal` 闭包内——egui 0.31 下面板被压成单行高，两个 ScrollArea 内容全部零高裁剪（仅左右标题渲染，表单/构建日志区一片空白；a11y 树逻辑控件齐全，因此此前基于无障碍树的验证均未暴露）。修复：两面板直接挂载到 Tab 的 Ui（egui 面板并排的标准用法），移除 horizontal 包裹层；v1.0.1 起即存在此结构，非本期回归
+- **暗色主题下拉框白底白字（用户报告）**：自定义主题从 egui 默认**亮色** style 克隆后逐字段打补丁，`dark_mode = true` 仅翻转标志位、不重新推导任何颜色——所有未显式覆盖的字段（ComboBox 按钮与弹出层填充、widgets fg_stroke 等）保持亮色残留，弹出选项与关闭态选定值白底白字不可读。修复：改为先整体派生 `Visuals::dark()` 再叠加自定义覆盖（panel/window/faint/extreme bg 与 override_text_color 等既有覆盖全部保留），下拉框按钮、弹出层、按钮文字全部恢复深底浅字
+
 ## [1.1.0] - 2026-11-02
 
 ### Added（第八期 UI/CLI 覆盖率补齐 + 文档）
