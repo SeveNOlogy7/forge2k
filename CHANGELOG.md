@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-11
+
 ### Added（native cmake 迁移线）
 
 - **native ≥2026.1 CMake 迁移**：构建谓词从仅 `master` 扩为 `master || >= 2026.1`（master / 2026.1 / 2026.2 同走 CMake+Ninja 臂）；cmake 分支旗标补 `-DCP2K_USE_LIBTORCH=OFF` + `-DCP2K_USE_OPENPMD=OFF`（对齐 toolchain release-cmake 全套旗标集），dbcsr config 版本补丁由 sed 行升级为 **canonical SameMajorVersion 整文件覆写**（两段式 set 行补丁会把 `CVF_VERSION_MAJOR` 解析成 "2026"，仍遭 SameMajorVersion 语义拒绝）；`validate_native_config` CUDA 特判同步扩为 uses_cmake 语义（cmake 臂版本 + CUDA 组合继续显式拒绝，不静默错建）；GUI native 版本下拉恢复五项 master / 2026.1 / 2026.2 / 2025.2 / 2024.3（两处测试反转 + Build Tab / About 文案同步清偿失实摘除）。e2e `native_2026.2_x86_64_none` 全绿（run 41454929016：cmake 臂构建退出码 0、产物断言 `/opt/cp2k/install/bin/cp2k.psmp`、smoke `grep 'CP2K version 2026.2'` 版本硬门）
